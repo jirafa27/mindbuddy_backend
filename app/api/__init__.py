@@ -1,7 +1,5 @@
-from fastapi import APIRouter
-from app.api import files
+"""API: точка входа — v1."""
+from app.api.v1 import api_router
 
-api_router = APIRouter()
-
-api_router.include_router(files.router, prefix="/files", tags=["files"])
+__all__ = ["api_router"]
 

@@ -124,3 +124,6 @@ static/uploads/
 # Backup files
 *.bak
 *.backup
+
+
+.cursor/

@@ -9,12 +9,22 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:password@db:5432/mindbuddy"
+    # Тесты: по умолчанию под docker-compose.test.yml (user/password/mindbuddy_test на 5433)
+    DATABASE_TEST_URL: Optional[str] = "postgresql+asyncpg://user:password@localhost:5433/mindbuddy_test"
 
     # Redis
     REDIS_URL: str = "redis://redis:6379/0"
 
     # RabbitMQ
     RABBITMQ_URL: str = "amqp://guest:guest@rabbitmq:5672//"
+
+    # MinIO / S3
+    MINIO_ENDPOINT: str = "minio:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET_NAME: str = "mindbuddy-files"
+    MINIO_BUCKET_TEMP_BLOBS: str = "temp-blobs"
+    MINIO_SECURE: bool = False
 
     # Yandex Cloud API
     YANDEX_IAM_TOKEN: Optional[str] = None  # Можно задать напрямую или получить через OAuth
@@ -24,6 +34,8 @@ class Settings(BaseSettings):
     YANDEX_IAM_TIMEOUT: float = 30.0
     YANDEX_EMBED_URL: str = "https://llm.api.cloud.yandex.net:443/foundationModels/v1/textEmbedding"
     YANDEX_EMBED_TIMEOUT: float = 30.0
+    YANDEX_COMPLETION_URL: str = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    YANDEX_COMPLETION_TIMEOUT: float = 60.0
 
     # Text Chunking
     CHUNK_SIZE: int = 512  # tokens

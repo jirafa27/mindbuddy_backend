@@ -1,8 +1,8 @@
-from fastapi import Request, HTTPException, status
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
 import logging
+
+from fastapi import Request, status
+from fastapi.responses import JSONResponse
 
 from app.core.exceptions import (
     AppException,
@@ -11,69 +11,63 @@ from app.core.exceptions import (
     ForbiddenError,
     FileTooLargeError,
     EmbeddingGenerationError,
+    FileProcessingError,
 )
 
 logger = logging.getLogger(__name__)
 
-# Маппинг исключений на HTTP статус коды
 EXCEPTION_STATUS_MAP = {
     ValidationError: status.HTTP_400_BAD_REQUEST,
     NotFoundError: status.HTTP_404_NOT_FOUND,
     ForbiddenError: status.HTTP_403_FORBIDDEN,
     FileTooLargeError: status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     EmbeddingGenerationError: status.HTTP_500_INTERNAL_SERVER_ERROR,
+    FileProcessingError: status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
 
 
-class ExceptionHandlerMiddleware(BaseHTTPMiddleware):
-    """Middleware для централизованной обработки исключений"""
+async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+    """Обработчик исключений приложения (ValidationError, NotFoundError и т.д.)."""
+    exception_type = type(exc)
+    status_code = EXCEPTION_STATUS_MAP.get(
+        exception_type, status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
+    log_level = logger.warning if 400 <= status_code < 500 else logger.error
+    log_level("%s: %s", exception_type.__name__, exc.message)
+    return JSONResponse(status_code=status_code, content={"detail": exc.message})
 
-    async def dispatch(self, request: Request, call_next):
-        try:
-            response = await call_next(request)
-            return response
-        except HTTPException as e:
-            # FastAPI HTTPException пропускаем как есть
-            raise
-        except AppException as e:
-            # Все исключения приложения - маппим на HTTP статус код
-            exception_type = type(e)
-            status_code = EXCEPTION_STATUS_MAP.get(
-                exception_type, status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-            
-            log_level = logger.warning if 400 <= status_code < 500 else logger.error
-            log_level(f"{exception_type.__name__}: {e.message}")
-            
-            return JSONResponse(
-                status_code=status_code,
-                content={"detail": e.message}
-            )
-        except UnicodeDecodeError as e:
-            # Ошибки декодирования файлов
-            logger.error(f"Unicode decode error: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": "File must be valid UTF-8 text"}
-            )
-        except httpx.HTTPStatusError as e:
-            # HTTP ошибки от внешних API
-            logger.error(f"HTTP error from external API: {e.response.status_code} - {e.response.text}")
-            return JSONResponse(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                content={"detail": f"External API error: {e.response.status_code}"}
-            )
-        except httpx.RequestError as e:
-            # Ошибки сетевых запросов
-            logger.error(f"Request error: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"detail": f"Service unavailable: {str(e)}"}
-            )
-        except Exception as e:
-            # Все остальные необработанные исключения
-            logger.exception(f"Unexpected error: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": "Internal server error"}
-            )
+
+async def unicode_decode_error_handler(request: Request, exc: UnicodeDecodeError) -> JSONResponse:
+    """Ошибки декодирования файлов."""
+    logger.error("Unicode decode error: %s", exc)
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"detail": "File must be valid UTF-8 text"},
+    )
+
+
+async def httpx_status_error_handler(request: Request, exc: httpx.HTTPStatusError) -> JSONResponse:
+    """HTTP ошибки от внешних API."""
+    logger.error("HTTP error from external API: %s - %s", exc.response.status_code, exc.response.text)
+    return JSONResponse(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        content={"detail": f"External API error: {exc.response.status_code}"},
+    )
+
+
+async def httpx_request_error_handler(request: Request, exc: httpx.RequestError) -> JSONResponse:
+    """Ошибки сетевых запросов."""
+    logger.error("Request error: %s", exc)
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": f"Service unavailable: {str(exc)}"},
+    )
+
+
+async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Все необработанные исключения (в т.ч. из репозиториев и БД)."""
+    logger.exception("Unexpected error: %s", exc)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error"},
+    )

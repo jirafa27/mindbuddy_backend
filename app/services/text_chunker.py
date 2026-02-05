@@ -3,25 +3,31 @@ from typing import List
 from app.core.config import settings
 
 
-class TextChunker:
+class TextChunkerService:
     """Сервис для разбиения текста на чанки с сохранением контекста"""
 
     def __init__(self):
-        self.encoding = tiktoken.encoding_for_model("text-embedding-3-small")
+        self.encoding = tiktoken.get_encoding("cl100k_base")
         self.chunk_size = settings.CHUNK_SIZE
         self.chunk_overlap = settings.CHUNK_OVERLAP
 
-    def chunk_text(self, text: str) -> List[str]:
+    def chunk_text(self, text: str, filename: str | None = None) -> List[str]:
         """
         Разбивает текст на чанки по заданному размеру с перекрытием.
         Старается не разрывать предложения.
 
         Args:
             text: Исходный текст для разбиения
+            filename: Название файла (добавляется в начало текста для индексации)
 
         Returns:
             Список текстовых чанков
         """
+        # Добавляем название файла в начало текста для лучшего поиска
+        if filename:
+            # Убираем расширение файла
+            name_without_ext = filename.rsplit(".", 1)[0] if "." in filename else filename
+            text = f"# {name_without_ext}\n\n{text}"
         # Разбиваем на предложения (простая эвристика)
         sentences = self._split_into_sentences(text)
         
