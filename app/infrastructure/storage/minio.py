@@ -1,4 +1,4 @@
-"""Одна реализация: MinIOStorage реализует BlobStorage и FileStorage (два бакета)."""
+"""Реализация хранилища MinIO"""
 import asyncio
 import io
 import logging
@@ -16,8 +16,6 @@ from app.domain.protocols import BlobStorage, FileStorage
 
 logger = logging.getLogger(__name__)
 
-# Константа для временного бакета blob'ов (Claim Check pattern)
-TEMP_BLOB_BUCKET = settings.MINIO_BUCKET_TEMP_BLOBS  # "temp-blobs"
 
 
 class MinIOStorage(BlobStorage, FileStorage):
@@ -35,7 +33,7 @@ class MinIOStorage(BlobStorage, FileStorage):
             region_name="us-east-1",
         )
         self.bucket_name = bucket or settings.MINIO_BUCKET_NAME
-        self._blob_bucket_name = blob_bucket or TEMP_BLOB_BUCKET
+        self._blob_bucket_name = blob_bucket or settings.MINIO_BUCKET_TEMP_BLOBS
         self._ensure_bucket_exists(self.bucket_name)
         self._ensure_bucket_exists(self._blob_bucket_name)
         self._setup_blob_bucket_lifecycle()
@@ -58,7 +56,7 @@ class MinIOStorage(BlobStorage, FileStorage):
                     pass
 
     def _setup_blob_bucket_lifecycle(self) -> None:
-        """Настраивает auto-cleanup для temp-blobs: удаление через 1 день."""
+        """Настраивает auto-cleanup для temp-blobs: удаление через 1 день"""
         lifecycle_config = {
             "Rules": [
                 {
@@ -76,10 +74,7 @@ class MinIOStorage(BlobStorage, FileStorage):
             )
             logger.debug("Lifecycle policy set for bucket=%s", self.blob_bucket_name)
         except ClientError as e:
-            # MinIO может не поддерживать lifecycle в некоторых конфигурациях
             logger.warning("Failed to set lifecycle for bucket=%s: %s", self.blob_bucket_name, e)
-
-    # --- BlobStorage (Claim Check, бакет blob_bucket) ---
 
     async def put_blob(self, data: Any) -> str:
         key = uuid.uuid4().hex
@@ -91,7 +86,6 @@ class MinIOStorage(BlobStorage, FileStorage):
             self.blob_bucket_name,
             key,
         )
-        # Убеждаемся, что объект виден (eventual consistency): иначе DBAgent получит NoSuchKey
         for attempt in range(5):
             try:
                 await asyncio.to_thread(
@@ -115,7 +109,6 @@ class MinIOStorage(BlobStorage, FileStorage):
                 raise RuntimeError(
                     f"put_blob: object {key} not visible in {self.blob_bucket_name} after 5 checks"
                 )
-        # Не должны сюда попасть, но на всякий случай
         raise RuntimeError(f"put_blob: object {key} not visible in {self.blob_bucket_name}")
 
     async def get_blob(self, key: str) -> Any:
@@ -131,7 +124,6 @@ class MinIOStorage(BlobStorage, FileStorage):
             finally:
                 response["Body"].close()
 
-        # Retry с 5 попытками и интервалом 1 секунда
         last_error: Optional[Exception] = None
         for attempt in range(5):
             try:
@@ -151,10 +143,8 @@ class MinIOStorage(BlobStorage, FileStorage):
                         continue
                 raise
             except Exception as e:
-                # Для других ошибок (ValueError, pickle и т.д.) — не ретраим
                 raise
 
-        # Если дошли сюда — все 5 попыток NoSuchKey
         raise last_error or RuntimeError(f"get_blob: key={key} not found after 5 retries")
 
     async def delete_blob(self, key: str) -> None:
@@ -163,8 +153,6 @@ class MinIOStorage(BlobStorage, FileStorage):
             Bucket=self.blob_bucket_name,
             Key=key,
         )
-
-    # --- FileStorage (постоянные файлы, бакет bucket) ---
 
     @staticmethod
     def generate_object_name(

@@ -1,6 +1,5 @@
 import json
 import logging
-import time
 from typing import Optional
 import pika
 from pika.exceptions import AMQPConnectionError
@@ -98,17 +97,3 @@ class RabbitMQService:
         finally:
             if connection and not connection.is_closed:
                 connection.close()
-
-    def get_watcher_task_with_timeout(
-        self,
-        user_id: int,
-        timeout: int = 30,
-        check_interval: float = 0.5,
-    ) -> Optional[dict]:
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            task = self.get_watcher_task(user_id=user_id)
-            if task is not None:
-                return task
-            time.sleep(check_interval)
-        return None

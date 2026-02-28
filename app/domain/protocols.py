@@ -1,17 +1,21 @@
-"""Domain protocols (ports): контракты для внешних адаптеров."""
 from typing import Any, Protocol, Optional, List
 
 from app.domain.entities import (
     FileEntity,
+    UserFileEntity,
     UserEntity,
     NamespaceEntity,
     ChunkEntity,
     SearchResultRow,
+    ParsedContent,
+    SummaryEntity,
 )
 
 
 class EmbeddingProvider(Protocol):
-    """Поставщик эмбеддингов (документ и запрос)."""
+    """
+    Протокол для работы с эмбеддингами
+    """
 
     async def generate_embedding(self, text: str) -> List[float]:
         ...
@@ -24,7 +28,9 @@ class EmbeddingProvider(Protocol):
 
 
 class LLMProvider(Protocol):
-    """LLM для генерации текста (completion)."""
+    """
+    Протокол для работы с LLM
+    """
 
     async def complete(
         self,
@@ -36,11 +42,15 @@ class LLMProvider(Protocol):
 
 
 class BlobStorage(Protocol):
-    """Для быстрой переброски данных между агентами (Claim Check)."""
+    """
+    Протокол для работы с хранилищем, чтобы обмениваться данными между агентами
+    """
 
     @property
     def blob_bucket_name(self) -> str:
-        """Имя бакета для логирования."""
+        """
+        Имя бакета для логирования.
+        """
         ...
 
     async def put_blob(self, data: Any) -> str:
@@ -52,7 +62,7 @@ class BlobStorage(Protocol):
 
 
 class FileStorage(Protocol):
-    """Для работы с постоянными файлами пользователя."""
+    """Протокол для работы с постоянными файлами пользователя."""
 
     def generate_object_name(
         self,
@@ -81,20 +91,25 @@ class FileStorage(Protocol):
         ...
 
 
-class AsyncFileRepository(Protocol):
-    """Асинхронный репозиторий файлов."""
+class FileRepository(Protocol):
+    """
+    Протокол репозитория файлов
+    """
 
     async def get_by_id(self, file_id: int) -> Optional[FileEntity]:
         ...
 
+    async def get_by_content_hash(self, content_hash: str) -> Optional[FileEntity]:
+        ...
+
     async def create(
         self,
-        user_id: int,
-        namespace_id: int,
-        filename: str,
-        file_path: str,
-        file_type: str,
-        file_size: int,
+        content_hash: str,
+        source_url: Optional[str] = None,
+        transcript_text: Optional[str] = None,
+        file_path: Optional[str] = None,
+        media_metadata: Optional[dict] = None,
+        processing_status: str = "pending",
     ) -> FileEntity:
         ...
 
@@ -102,13 +117,39 @@ class AsyncFileRepository(Protocol):
         ...
 
 
+class UserFileRepository(Protocol):
+    """
+    Протокол репозитория пользовательских файлов
+    """
+    async def get_by_id(self, user_file_id: int) -> Optional[UserFileEntity]:
+        ...
+
+    async def create(self, user_file: UserFileEntity) -> UserFileEntity:
+        ...
+
+    async def delete(self, user_file: UserFileEntity) -> None:
+        ...
+
+    async def update_namespace(self, user_file_id: int, namespace_id: Optional[int] = None) -> Optional[UserFileEntity]:
+        ...
+
+    async def find_by_source_url(self, source_url: str, user_id: int) -> Optional[UserFileEntity]:
+        ...
+
+    async def find_by_content_hash(self, content_hash: str, user_id: int) -> Optional[UserFileEntity]:
+        ...
+
+    async def find_by_user_and_file(self, user_id: int, file_id: int) -> Optional[UserFileEntity]:
+        ...
+
+
 class UserRepository(Protocol):
-    """Репозиторий пользователей."""
+    """Протокол репозитория пользователей."""
 
     async def get_by_id(self, user_id: int) -> Optional[UserEntity]:
         ...
 
-    async def get_by_telegram_id(self, telegram_id: int) -> Optional[UserEntity]:
+    async def get_by_email(self, email: str) -> Optional[UserEntity]:
         ...
 
     async def get_by_watcher_token(self, token: str) -> Optional[UserEntity]:
@@ -116,27 +157,45 @@ class UserRepository(Protocol):
 
     async def create(
         self,
-        telegram_id: Optional[int] = None,
-        username: Optional[str] = None,
+        email: str,
+        password_hash: str,
         full_name: Optional[str] = None,
+        watcher_token: Optional[str] = None,
     ) -> UserEntity:
         ...
 
 
 class NamespaceRepository(Protocol):
-    """Репозиторий пространств знаний."""
+    """Протокол репозитория пространств знаний."""
 
     async def get_by_id(self, namespace_id: int) -> Optional[NamespaceEntity]:
+        ...
+
+    async def get_by_name_and_user(self, name: str, user_id: int) -> Optional[NamespaceEntity]:
+        ...
+
+    async def create(
+        self,
+        name: str,
+        user_id: int,
+        description: Optional[str] = None,
+    ) -> NamespaceEntity:
         ...
 
     async def get_by_user_with_files(self, user_id: int) -> List[NamespaceEntity]:
         ...
 
+    async def update(self, namespace: NamespaceEntity) -> NamespaceEntity:
+        ...
+
+    async def delete(self, id: int) -> None:
+        ...
+
 
 class VectorRepository(Protocol):
-    """Синхронный репозиторий эмбеддингов (create_batch, search)."""
+    """Репозиторий эмбеддингов: создание чанков и семантический поиск."""
 
-    def create_batch(
+    async def create_batch(
         self,
         file_id: int,
         chunks: List[str],
@@ -145,22 +204,9 @@ class VectorRepository(Protocol):
     ) -> List[ChunkEntity]:
         ...
 
-    def search_by_embedding(
+    async def search(
         self,
         query_embedding: List[float],
-        limit: int = 5,
-        namespace_id: Optional[int] = None,
-    ) -> List[SearchResultRow]:
-        ...
-
-
-class AsyncVectorEmbeddingRepository(Protocol):
-    """Асинхронное выполнение SQL векторного поиска."""
-
-    async def execute_search_sql(
-        self,
-        sql: str,
-        query_embedding: Optional[List[float]],
         user_id: int,
         limit: int = 5,
         namespace_id: Optional[int] = None,
@@ -168,17 +214,55 @@ class AsyncVectorEmbeddingRepository(Protocol):
         ...
 
 
-class WatcherTaskPublisher(Protocol):
-    """Публикация задач для Desktop Watcher (очередь сообщений)."""
+class SummaryRepository(Protocol):
+    """Протокол репозитория суммаризаций."""
 
-    def send_watcher_task(
+    async def get_by_file_id(self, file_id: int) -> Optional[SummaryEntity]:
+        ...
+
+    async def get_by_file_and_lookup_key(
+        self, file_id: int, lookup_key: str
+    ) -> Optional[SummaryEntity]:
+        ...
+
+    async def create(
         self,
         file_id: int,
-        user_id: int,
+        text: str,
+        lookup_key: str = "standard_v1",
+        used_prompt: Optional[str] = None,
+        model_name: Optional[str] = "yandexgpt",
+        **kwargs: Any,
+    ) -> SummaryEntity:
+        ...
+
+
+class TaskPublisher(Protocol):
+    """Общий протокол постановки фоновых задач (Celery и т.д.)."""
+
+    def send_embeddings_task(
+        self,
+        content_file_id: int,
+        text: str,
+        namespace_id: Optional[int],
         filename: str,
-        file_type: str,
-        file_size: int,
-        download_url: str,
-        local_path: Optional[str] = None,
-    ) -> bool:
+        user_file_id: int,
+    ) -> Optional[str]:
+        """Постановка задачи на построение эмбеддингов. Возвращает task_id или None."""
+        ...
+
+    def send_summary_url_task(self, url: str, user_id: int) -> Optional[str]:
+        """Постановка задачи на суммаризацию по URL. Возвращает task_id или None."""
+        ...
+
+
+class ContentParser(Protocol):
+    """Протокол парсера контента"""
+
+    def can_handle(self, url: str) -> bool:
+        """Проверяет, может ли парсер обработать данный URL."""
+        ...
+
+    async def parse(self, url: str) -> ParsedContent:
+        """Извлекает контент из URL"""
         ...

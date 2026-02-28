@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 
 
-@dataclass(frozen=False)
+@dataclass
 class ChunkEntity:
     """Текстовый чанк с эмбеддингом"""
     id: int

@@ -1,11 +1,12 @@
 """MindBuddyAgent: синтез ответа по найденным чанкам (RAG)."""
-from typing import Any, List
 import logging
-from app.agents.state import AskState
+from typing import Any, List
+
+from langchain_core.runnables import RunnableConfig
+
+from app.graph.state import AskState
 from app.domain.protocols import LLMProvider
 from app.infrastructure.llm.yandex_completion import LLMCompletionError
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,20 @@ class MindBuddyAgent:
     def __init__(self, *, llm_service: LLMProvider):
         self.llm_service = llm_service
 
-    async def run(self, state: AskState, config: dict | None = None) -> dict[str, Any]:
+    async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
         question = state.get("question") or ""
         search_result = state.get("search_result") or []
         agent_steps = list(state.get("agent_steps") or [])
+        
+        # Если ответ уже сформирован ранее (например, RouterNode) — просто возвращаем его
+        existing_answer = state.get("answer")
+        if existing_answer and not search_result:
+            logger.info("[MindBuddyAgent] Returning pre-set answer")
+            return {
+                "answer": existing_answer,
+                "sources": [],
+                "agent_steps": agent_steps + ["MindBuddyAgent (pass-through)"],
+            }
 
         sources = []
         seen_files = set()

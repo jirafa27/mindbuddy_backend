@@ -3,11 +3,11 @@ from datetime import datetime
 from typing import Optional
 
 
-@dataclass(frozen=False)
+@dataclass
 class UserEntity:
     """Пользователь системы"""
     id: int
-    telegram_id: Optional[int] = None
+    email: str = ""
     username: Optional[str] = None
     full_name: Optional[str] = None
     is_active: bool = True

@@ -58,3 +58,9 @@ class ListResponseData(BaseModel, Generic[T]):
     pagination: PaginationInfo = Field(..., description="Информация о пагинации")
 
 
+class HistoryMessage(BaseModel):
+    """Сообщение из истории чата."""
+    role: str = Field(..., description="Роль: 'user' или 'assistant'")
+    text: str = Field(..., description="Текст сообщения")
+    file_id: Optional[int] = Field(None, description="ID файла, если к сообщению был приложен файл")
+

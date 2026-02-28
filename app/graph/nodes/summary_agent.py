@@ -1,0 +1,194 @@
+"""SummaryAgent: суммаризация текста с поддержкой Map-Reduce для больших документов."""
+import asyncio
+import logging
+from typing import Optional
+
+from app.graph.schemas import SummaryResult
+from app.core.config import settings
+from app.core.enums import SummaryMethod
+from app.domain.protocols import LLMProvider
+from app.services.text_chunker import TextChunkerService
+
+logger = logging.getLogger(__name__)
+
+
+class SummaryAgent:
+    """Агент суммаризации с поддержкой Stuffing и Map-Reduce.
+    
+    Порог и размер чанков привязаны к окну контекста Yandex (YANDEX_COMPLETION_CONTEXT_TOKENS):
+    - Stuffing: один запрос, если текст укладывается в (окно − запас под промпт и ответ)
+    - Map-Reduce: текст режется на чанки чуть меньше окна, каждый чанк суммаризируется, затем финальное объединение
+    """
+    
+    SYSTEM_PROMPT_SUMMARY = (
+        "Ты — эксперт по суммаризации текста. "
+        "Создай краткое и информативное резюме представленного текста. "
+        "Сохрани ключевые факты, идеи и выводы. "
+        "Отвечай на русском языке."
+    )
+    
+    SYSTEM_PROMPT_CHUNK = (
+        "Ты — эксперт по суммаризации. "
+        "Создай краткое резюме этого фрагмента текста, сохранив ключевые факты. "
+        "Отвечай кратко, на русском языке."
+    )
+    
+    SYSTEM_PROMPT_FINAL = (
+        "Ты — эксперт по суммаризации. "
+        "На основе представленных резюме фрагментов создай единое связное резюме всего документа. "
+        "Убери повторы, сохрани ключевые факты и идеи. "
+        "Отвечай на русском языке."
+    )
+    
+    def __init__(
+        self,
+        llm_service: LLMProvider,
+        text_chunker: Optional[TextChunkerService] = None,
+    ):
+        """
+        Args:
+            llm_service: LLM провайдер для генерации
+            text_chunker: Сервис разбиения на чанки (для Map-Reduce)
+        """
+        self.llm_service = llm_service
+        self.text_chunker = text_chunker
+    
+    def _max_input_tokens(self) -> int:
+        """Максимум токенов на вход в одном запросе (окно минус запас под промпт и ответ)."""
+        return max(
+            512,
+            settings.YANDEX_COMPLETION_CONTEXT_TOKENS - settings.YANDEX_SUMMARY_CONTEXT_RESERVE,
+        )
+
+    async def summarize(
+        self,
+        text: str,
+        title: Optional[str] = None,
+    ) -> SummaryResult:
+        """
+        Создаёт резюме текста.
+        
+        Автоматически выбирает метод по размеру в токенах (окно Yandex):
+        - Stuffing: текст помещается в (окно − запас)
+        - Map-Reduce: текст режется на чанки чуть меньше окна, затем финальное объединение
+        
+        Args:
+            text: Текст для суммаризации
+            title: Заголовок документа (опционально)
+            
+        Returns:
+            SummaryResult с резюме и метаданными
+        """
+        if not self.text_chunker:
+            # Без чанкера — всегда stuffing (риск при длинном тексте)
+            return await self._stuffing(text, title)
+        # Считаем токены того же user-сообщения, что уйдёт в LLM при stuffing
+        user_text = text if not title else f"Документ: {title}\n\n{text}"
+        user_message = f"Создай резюме следующего текста:\n\n{user_text}"
+        system_tokens = self.text_chunker.count_tokens(self.SYSTEM_PROMPT_SUMMARY)
+        user_tokens = self.text_chunker.count_tokens(user_message)
+        max_input = self._max_input_tokens()
+        if system_tokens + user_tokens <= max_input:
+            return await self._stuffing(text, title)
+        return await self._map_reduce(text, title)
+    
+    async def _stuffing(self, text: str, title: Optional[str] = None) -> SummaryResult:
+        """Суммаризация коротких текстов одним запросом к Pro модели."""
+        logger.info("[Summary] Starting Stuffing method (text length: %d)", len(text))
+        
+        user_text = text
+        if title:
+            user_text = f"Документ: {title}\n\n{text}"
+        
+        messages = [
+            {"role": "system", "text": self.SYSTEM_PROMPT_SUMMARY},
+            {"role": "user", "text": f"Создай резюме следующего текста:\n\n{user_text}"},
+        ]
+        
+        summary = await self.llm_service.complete(
+            messages,
+            temperature=0.3,
+            max_tokens=2048,
+        )
+        
+        logger.info("[Summary] Stuffing completed, summary length: %d", len(summary))
+        
+        return SummaryResult(
+            content=summary.strip(),
+            model_name="yandexgpt-pro",
+            method=SummaryMethod.STUFFING,
+            chunks_processed=1,
+        )
+    
+    async def _map_reduce(self, text: str, title: Optional[str] = None) -> SummaryResult:
+        """Суммаризация длинных текстов через Map-Reduce.
+        
+        1. Map: Разбиваем текст на чанки по размеру чуть меньше окна Yandex, суммаризируем каждый
+        2. Reduce: Объединяем резюме чанков в финальное резюме
+        """
+        max_chunk_tokens = self._max_input_tokens()
+        logger.info(
+            "[Summary] Map-Reduce started for text length: %d, chunk max tokens: %d",
+            len(text),
+            max_chunk_tokens,
+        )
+        
+        # Map: разбиваем на чанки по токенам (чуть меньше окна контекста)
+        chunks = self.text_chunker.chunk_text(
+            text,
+            chunk_size=max_chunk_tokens,
+            chunk_overlap=min(100, max_chunk_tokens // 10),
+        )
+        logger.info("[Summary] Split into %d chunks", len(chunks))
+        
+        # Map: параллельная суммаризация чанков через asyncio.gather
+        async def summarize_chunk(chunk: str, index: int) -> str:
+            """Суммаризирует один чанк."""
+            messages = [
+                {"role": "system", "text": self.SYSTEM_PROMPT_CHUNK},
+                {"role": "user", "text": f"Резюмируй этот фрагмент:\n\n{chunk}"},
+            ]
+            result = await self.llm_service.complete(
+                messages,
+                temperature=0.2,
+                max_tokens=512,
+            )
+            logger.info("[Summary] Chunk %d/%d processed", index + 1, len(chunks))
+            return result.strip()
+        
+        # Запускаем все чанки параллельно
+        chunk_tasks = [
+            summarize_chunk(chunk, i) for i, chunk in enumerate(chunks)
+        ]
+        chunk_summaries = await asyncio.gather(*chunk_tasks)
+        
+        logger.info("[Summary] All %d chunks processed, starting Reduce", len(chunks))
+        
+        # Reduce: объединяем резюме чанков
+        combined_summaries = "\n\n---\n\n".join(
+            f"Фрагмент {i+1}:\n{s}" for i, s in enumerate(chunk_summaries)
+        )
+        
+        reduce_text = combined_summaries
+        if title:
+            reduce_text = f"Документ: {title}\n\n{combined_summaries}"
+        
+        messages = [
+            {"role": "system", "text": self.SYSTEM_PROMPT_FINAL},
+            {"role": "user", "text": f"На основе резюме фрагментов создай единое резюме документа:\n\n{reduce_text}"},
+        ]
+        
+        final_summary = await self.llm_service.complete(
+            messages,
+            temperature=0.3,
+            max_tokens=2048,
+        )
+        
+        logger.info("[Summary] Map-Reduce completed, final summary length: %d", len(final_summary))
+        
+        return SummaryResult(
+            content=final_summary.strip(),
+            model_name="yandexgpt-pro",
+            method=SummaryMethod.MAP_REDUCE,
+            chunks_processed=len(chunks),
+        )

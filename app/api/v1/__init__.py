@@ -1,12 +1,13 @@
-"""API v1: роутеры (files, namespaces, users, watcher, chat)."""
+"""API v1: роутеры (auth, files, namespaces, users, chat, summary)."""
 from fastapi import APIRouter
 
-from . import files, namespaces, users, watcher, chat
+from . import auth, files, namespaces, users, chat, summary
 
 api_router = APIRouter()
 
+api_router.include_router(auth.router)
 api_router.include_router(files.router, prefix="/files", tags=["files"])
 api_router.include_router(namespaces.router, prefix="/namespaces", tags=["namespaces"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
-api_router.include_router(watcher.router, prefix="/watcher", tags=["watcher"])
 api_router.include_router(chat.router, tags=["chat"])
+api_router.include_router(summary.router, tags=["summary"])

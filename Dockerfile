@@ -5,7 +5,7 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
-# Установка зависимостей системы (минимальный набор)
+# Установка зависимостей системы
 RUN apt-get clean && \
     apt-get update && \
     apt-get install -y --no-install-recommends \

@@ -1,13 +1,25 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 
-@dataclass(frozen=False)
+@dataclass
+class NamespaceFileItem:
+    """Файл в пространстве: данные для отображения и удаления из хранилища"""
+    id: int
+    file_path: Optional[str] = None
+    filename: str = ""
+    file_type: str = "md"
+    file_size: int = 0
+    created_at: Optional[datetime] = None
+
+
+@dataclass
 class NamespaceEntity:
     """Пространство знаний"""
     id: int
     user_id: int
     name: str
     description: Optional[str] = None
+    user_files: List[NamespaceFileItem] = field(default_factory=list)
     created_at: Optional[datetime] = None

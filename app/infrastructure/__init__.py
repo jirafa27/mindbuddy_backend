@@ -1,1 +1,4 @@
-"""Infrastructure layer: DB, repositories, LLM, storage, message broker."""
+"""
+Слой инфраструктуры.
+Содержит конкретные реализации компонентов.
+"""

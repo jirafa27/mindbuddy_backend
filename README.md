@@ -179,19 +179,6 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Запуск локально (без Docker)
-
-```bash
-# Запустите зависимости
-docker-compose up -d db redis rabbitmq minio
-
-# Запустите backend
-uvicorn app.main:app --reload
-
-# В другом терминале запустите Celery worker
-celery -A app.infrastructure.workers.celery_app worker --loglevel=info
-```
-
 ---
 
 ## 📝 Поддерживаемые форматы файлов

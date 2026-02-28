@@ -35,10 +35,10 @@ class FileReaderFactory:
             file_extension: Расширение файла (без точки, например 'pdf')
 
         Returns:
-            Экземпляр reader'а для данного типа файла
+            Экземпляр Reader для данного типа файла
 
         Raises:
-            ValueError: Если для данного типа файла нет reader'а
+            ValueError: Если для данного типа файла нет Reader'а
         """
         file_extension = file_extension.lower()
         
@@ -46,7 +46,3 @@ class FileReaderFactory:
             raise ValueError(f"No reader available for file extension: {file_extension}")
         
         return self._readers[file_extension]
-
-    def get_supported_extensions(self) -> list[str]:
-        """Возвращает список всех поддерживаемых расширений файлов"""
-        return list(self._readers.keys())

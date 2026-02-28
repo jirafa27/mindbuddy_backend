@@ -12,6 +12,7 @@ from app.core.exceptions import (
     FileTooLargeError,
     EmbeddingGenerationError,
     FileProcessingError,
+    ContentExtractionError,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ EXCEPTION_STATUS_MAP = {
     FileTooLargeError: status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     EmbeddingGenerationError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     FileProcessingError: status.HTTP_500_INTERNAL_SERVER_ERROR,
+    ContentExtractionError: status.HTTP_422_UNPROCESSABLE_ENTITY,
 }
 
 

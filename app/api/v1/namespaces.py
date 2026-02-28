@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, status, Query
 import logging
 
@@ -14,7 +15,8 @@ from app.schemas import (
 )
 from app.domain.protocols import FileStorage
 from app.services.namespace_service import NamespaceService
-from app.core.dependencies import get_namespace_service, get_storage_service
+from app.core.dependencies import get_namespace_service, get_storage_service, get_current_user
+from app.schemas.user import UserResponse
 
 logger = logging.getLogger(__name__)
 
@@ -28,26 +30,16 @@ router = APIRouter()
     summary="Создать namespace",
 )
 async def create_namespace(
-    user_id: int,
     namespace: NamespaceCreate,
+    user: UserResponse = Depends(get_current_user),
     service: NamespaceService = Depends(get_namespace_service),
 ):
     """
-    Создает новый namespace для пользователя.
-    
-    Args:
-        user_id: ID пользователя
-        namespace: Данные для создания
-        
-    Returns:
-        ID созданного namespace
-        
-    Raises:
-        ValidationError: Если namespace с таким именем уже существует
+    Создает новый namespace для пользователя. Аутентификация: JWT.
     """
     created = await service.create_namespace(
         name=namespace.name,
-        user_id=user_id,
+        user_id=user.id,
         description=namespace.description,
     )
     return ResponseMessage(data=created)
@@ -60,51 +52,38 @@ async def create_namespace(
 )
 async def get_namespace(
     namespace_id: int,
-    user_id: int,
+    user: UserResponse = Depends(get_current_user),
     service: NamespaceService = Depends(get_namespace_service),
     storage_service: FileStorage = Depends(get_storage_service),
 ):
-    """
-    Получает информацию о namespace со списком файлов и ссылками на скачивание.
-    
-    Args:
-        namespace_id: ID namespace
-        user_id: ID пользователя
-        
-    Returns:
-        Информация о namespace с файлами и presigned URL
-        
-    Raises:
-        NotFoundError: Если namespace не найден
-        ForbiddenError: Если нет доступа
-    """
+    """Получает информацию о namespace. Аутентификация: JWT."""
     ns_data = await service.get_namespace(
         namespace_id=namespace_id,
-        user_id=user_id,
+        user_id=user.id,
     )
     files = await service.get_namespace_files(namespace_id)
     files_with_urls = []
     for f in files:
-        if f.file_path:
-            try:
-                download_url = storage_service.get_file_url(
-                    object_name=f.file_path,
-                    expires_in=86400,
+        if not f.file_path:
+            continue
+        try:
+            download_url = storage_service.get_file_url(
+                object_name=f.file_path,
+                expires_in=86400,
+            )
+            filename = decode_filename(f.filename)
+            files_with_urls.append(
+                FileWithUrl(
+                    id=f.id,
+                    filename=filename,
+                    file_type=f.file_type,
+                    file_size=f.file_size,
+                    download_url=download_url,
+                    created_at=f.created_at or datetime.utcnow(),
                 )
-                filename = decode_filename(f.filename)
-                files_with_urls.append(
-                    FileWithUrl(
-                        id=f.id,
-                        filename=filename,
-                        file_type=f.file_type,
-                        file_size=f.file_size,
-                        download_url=download_url,
-                        created_at=f.created_at,
-                    )
-                )
-            except Exception as e:
-                logger.warning("Failed to generate download URL for file: %s", e)
-                continue
+            )
+        except Exception as e:
+            logger.warning("Failed to generate download URL for file: %s", e)
     ns_data = NamespaceResponse(
         id=ns_data.id,
         user_id=ns_data.user_id,
@@ -122,28 +101,29 @@ async def get_namespace(
     summary="Список namespace пользователя",
 )
 async def list_namespaces(
-    user_id: int,
     page: int = Query(1, ge=1, description="Номер страницы"),
     page_size: int = Query(20, ge=1, le=100, description="Размер страницы"),
+    user: UserResponse = Depends(get_current_user),
     service: NamespaceService = Depends(get_namespace_service),
 ):
-    """
-    Получает список namespace пользователя.
-    
-    Args:
-        user_id: ID пользователя
-        page: Номер страницы (начиная с 1)
-        page_size: Размер страницы
-        
-    Returns:
-        Список namespace с пагинацией (без файлов, с количеством файлов)
-    """
+    """Список namespace текущего пользователя. Аутентификация: JWT."""
     skip = (page - 1) * page_size
-    items, total = await service.get_user_namespaces(
-        user_id=user_id,
+    namespaces_with_count, total = await service.get_user_namespaces(
+        user_id=user.id,
         skip=skip,
         limit=page_size,
     )
+    items = [
+        NamespaceListItem(
+            id=ns.id,
+            user_id=ns.user_id,
+            name=ns.name,
+            description=ns.description,
+            created_at=ns.created_at,
+            files_count=count,
+        )
+        for ns, count in namespaces_with_count
+    ]
     pagination = PaginationInfo(total=total, page=page, page_size=page_size)
     return ResponseMessage(data=ListResponseData(items=items, pagination=pagination))
 
@@ -155,29 +135,14 @@ async def list_namespaces(
 )
 async def update_namespace(
     namespace_id: int,
-    user_id: int,
     namespace: NamespaceUpdate,
+    user: UserResponse = Depends(get_current_user),
     service: NamespaceService = Depends(get_namespace_service),
 ):
-    """
-    Обновляет namespace.
-    
-    Args:
-        namespace_id: ID namespace
-        user_id: ID пользователя
-        namespace: Данные для обновления
-        
-    Returns:
-        ID обновленного namespace
-        
-    Raises:
-        NotFoundError: Если namespace не найден
-        ForbiddenError: Если нет доступа
-        ValidationError: Если новое имя уже занято
-    """
+    """Обновляет namespace. Аутентификация: JWT."""
     updated = await service.update_namespace(
         namespace_id=namespace_id,
-        user_id=user_id,
+        user_id=user.id,
         name=namespace.name,
         description=namespace.description,
     )
@@ -191,28 +156,16 @@ async def update_namespace(
 )
 async def delete_namespace(
     namespace_id: int,
-    user_id: int,
-    service: NamespaceService = Depends(get_namespace_service),
+    user: UserResponse = Depends(get_current_user),
+    namespace_service: NamespaceService = Depends(get_namespace_service),
     storage_service: FileStorage = Depends(get_storage_service),
 ):
-    """
-    Удаляет namespace.
-    
-    Args:
-        namespace_id: ID namespace
-        user_id: ID пользователя
-        
-    Raises:
-        NotFoundError: Если namespace не найден
-        ForbiddenError: Если нет доступа
-    """
-    file_paths = await service.delete_namespace(
-        namespace_id=namespace_id,
-        user_id=user_id,
-    )
+    """Удаляет namespace и файлы из хранилища. Аутентификация: JWT."""
+    await namespace_service.get_namespace(namespace_id=namespace_id, user_id=user.id)
+    file_paths = await namespace_service.get_namespace_file_paths(namespace_id)
+    await namespace_service.delete_namespace(namespace_id=namespace_id, user_id=user.id)
     for path in file_paths:
         try:
             await storage_service.delete_file(path)
         except Exception as e:
             logger.warning("Failed to delete file from MinIO: %s", e)
-    # 204 No Content - тело ответа не возвращается

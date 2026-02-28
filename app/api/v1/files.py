@@ -1,28 +1,30 @@
-from fastapi import APIRouter, Depends, UploadFile, File, status, Response, Query
+from typing import Optional
+
+from fastapi import APIRouter, Depends, UploadFile, File, status, Query, Form
 from fastapi.responses import StreamingResponse
 import io
 import logging
 
-import uuid
 
 from app.utils.file import decode_filename, encode_filename_for_header
 from app.schemas.base import ResponseMessage
 from app.schemas.file import (
     FileResponse,
-    SyncToLocalRequest,
-    SyncToLocalResponse,
+    FileInfo,
 )
-from app.domain.protocols import WatcherTaskPublisher, FileStorage
 from app.services.file_service import FileService
+from app.services.summary_service import SummaryService
+from app.services.namespace_service import NamespaceService
 from app.core.dependencies import (
     get_file_service,
-    get_rabbitmq_service,
-    get_storage_service,
-    get_user_by_telegram_id,
+    get_current_user,
+    get_summary_service,
+    get_namespace_service,
+    get_task_publisher,
 )
-from app.infrastructure.workers.file_processing import process_file_embeddings
+from app.domain.protocols import TaskPublisher
 from app.schemas.user import UserResponse
-from app.core.exceptions import NotFoundError, ForbiddenError, ValidationError, FileProcessingError
+from app.core.exceptions import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -31,38 +33,84 @@ router = APIRouter()
 
 @router.post("/upload", response_model=ResponseMessage[FileResponse], status_code=status.HTTP_201_CREATED)
 async def upload_file(
-    file: UploadFile = File(...),
-    namespace_id: int = Query(...),
-    user_id: int = Query(...),
-    file_service: FileService = Depends(get_file_service)
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None, description="URL для парсинга (YouTube, веб-страница)"),
+    text: Optional[str] = Form(None, description="Текст для сохранения в пространство (Markdown)"),
+    title: Optional[str] = Form(None, description="Заголовок MD-файла (если передан text)"),
+    namespace_id: Optional[int] = Query(None, description="ID пространства (опционально; без значения — файл в Inbox пользователя)"),
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+    summary_service: SummaryService = Depends(get_summary_service),
+    namespace_service: NamespaceService = Depends(get_namespace_service),
+    task_publisher: TaskPublisher = Depends(get_task_publisher),
 ):
     """
-    Загружает файл на сервер и запускает векторизацию.
-    
-    **Используется для:**
-    - Загрузки из Telegram бота
-    - Загрузки из Desktop Watcher
-    
-    **Процесс:**
-    1. Сохраняет файл в MinIO
-    2. Создает запись в БД
-    3. Запускает задачу векторизации (RabbitMQ → Celery)
-    
-    **Для Telegram бота:** После этого эндпоинта вызовите `/sync-to-local` 
-    чтобы файл скачался на компьютер пользователя через Desktop Watcher.
-    
-    Returns:
-        file_id: ID файла в БД
-        task_id: ID задачи векторизации
-        status: "processing"
+    Универсальный эндпоинт загрузки контента (файл, URL или текст).
+    Аутентификация: JWT в заголовке Authorization.
     """
+    user_id = user.id
+    has_file = file is not None
+    has_url = bool(url and str(url).strip())
+    has_text = bool(text is not None and str(text).strip())
+    sources = has_file + has_url + has_text
+    if sources == 0:
+        raise ValidationError("Необходимо передать file, url или text")
+    if sources > 1:
+        raise ValidationError("Передайте только один из параметров: file, url или text")
+
+    if namespace_id is None:
+        namespace_id = await namespace_service.get_or_create_inbox(user_id)
+    
+    if url:
+        logger.info("[Upload] Processing URL: %s (user=%d, namespace_id=%s)", url, user_id, namespace_id)
+        ingest_result = await summary_service.ingest_url(
+            url=url,
+            user_id=user_id,
+            namespace_id=namespace_id,
+        )
+        task_id = task_publisher.send_embeddings_task(
+            content_file_id=ingest_result.content_file_id,
+            text=ingest_result.text,
+            namespace_id=namespace_id,
+            filename=ingest_result.filename,
+            user_file_id=ingest_result.file_id,
+        ) or ""
+        return ResponseMessage[FileResponse](data=FileResponse(
+            file_id=ingest_result.file_id,
+            filename=ingest_result.filename,
+            task_id=task_id,
+            status="duplicate" if ingest_result.is_duplicate else "processing",
+            message=ingest_result.message,
+        ))
+
+    # Обработка текста (сохранение как MD)
+    if text is not None:
+        file_created = await file_service.create_file_from_text(
+            text=text,
+            user_id=user_id,
+            namespace_id=namespace_id,
+            title=title,
+        )
+        task_id = task_publisher.send_embeddings_task(
+            content_file_id=file_created.content_file_id,
+            text=file_created.text,
+            namespace_id=namespace_id,
+            filename=file_created.filename,
+            user_file_id=file_created.file_id,
+        ) or ""
+        return ResponseMessage[FileResponse](data=FileResponse(
+            file_id=file_created.file_id,
+            filename=file_created.filename,
+            task_id=task_id,
+            status="processing",
+            message="Текст сохранён в пространство как Markdown",
+        ))
+
+    # Обработка файла
     file_content = await file.read()
     
-    # Декодируем имя файла, если оно пришло в URL-encoded виде
-    # FastAPI может передавать имена файлов с кириллицей в закодированном виде
     filename = decode_filename(file.filename or "unnamed_file")
     
-    # Создаем файл в БД и MinIO
     file_created = await file_service.upload_file(
         file_content=file_content,
         filename=filename,
@@ -70,109 +118,38 @@ async def upload_file(
         user_id=user_id,
     )
     
-    # Отправляем задачу на векторизацию в RabbitMQ
-    task = process_file_embeddings.delay(
-        file_id=file_created.file_id,
+    task_id = task_publisher.send_embeddings_task(
+        content_file_id=file_created.content_file_id,
         text=file_created.text,
         namespace_id=namespace_id,
         filename=file_created.filename,
-    )
+        user_file_id=file_created.file_id,
+    ) or ""
 
-    file_response = FileResponse(
+    return ResponseMessage[FileResponse](data=FileResponse(
         file_id=file_created.file_id,
         filename=file_created.filename,
-        task_id=task.id,
-        status="processing"
-    )
-    return ResponseMessage[FileResponse](data=file_response)
-
-
-@router.post("/sync-to-local", response_model=ResponseMessage[SyncToLocalResponse], status_code=status.HTTP_202_ACCEPTED)
-async def sync_to_local(
-    request: SyncToLocalRequest,
-    watcher_publisher: WatcherTaskPublisher = Depends(get_rabbitmq_service),
-    storage_service: FileStorage = Depends(get_storage_service),
-    file_service: FileService = Depends(get_file_service),
-):
-    """
-    Отправляет задачу Desktop Watcher'у для скачивания файла на локальный диск.
-    
-    **Используется только для Telegram бота:**
-    Когда файл загружен через Telegram, вызовите этот эндпоинт чтобы 
-    Desktop Watcher скачал файл на компьютер пользователя и начал мониторинг изменений.
-    
-    **Desktop Watcher должен:**
-    1. Получить задачу из RabbitMQ очереди "watcher_tasks"
-    2. Скачать файл по presigned URL из MinIO
-    3. Сохранить на диск пользователя
-    4. Начать мониторинг изменений
-    
-    **Для Desktop Watcher:** Этот эндпоинт НЕ нужен, т.к. файл уже на диске.
-    
-    Args:
-        file_id: ID файла на сервере
-        user_id: ID пользователя
-        local_path: Желаемый путь (опционально, watcher может выбрать сам)
-    
-    Returns:
-        task_id: Уникальный ID задачи для отслеживания
-        status: "pending"
-    """
-    # Получаем информацию о файле из БД
-    file = await file_service.get_file(file_id=request.file_id, user_id=request.user_id)
-    
-    # Генерируем presigned URL для скачивания (действует 24 часа)
-    try:
-        download_url = storage_service.get_file_url(
-            object_name=file.file_path,
-            expires_in=86400,
-        )
-    except Exception as e:
-        raise FileProcessingError(f"Не удалось сгенерировать ссылку для скачивания: {str(e)}")
-    
-    # Декодируем имя файла, если оно URL-encoded (для старых записей)
-    filename = decode_filename(file.filename)
-    
-    # Отправляем задачу в RabbitMQ напрямую (без Celery)
-    try:
-        watcher_publisher.send_watcher_task(
-            file_id=file.id,
-            user_id=file.user_id,
-            filename=filename,
-            file_type=file.file_type,
-            file_size=file.file_size,
-            download_url=download_url,
-            local_path=request.local_path,
-        )
-    except Exception as e:
-        raise FileProcessingError(f"Не удалось отправить задачу в RabbitMQ: {str(e)}")
-    
-    # Генерируем уникальный task_id для отслеживания
-    task_id = str(uuid.uuid4())
-    
-    sync_to_local_response = SyncToLocalResponse(
-        file_id=request.file_id,
         task_id=task_id,
-        status="pending",
-        message="Задача отправлена Desktop Watcher'у в очередь 'watcher_tasks'"
-    )
-    return ResponseMessage[SyncToLocalResponse](data=sync_to_local_response)
+        status="processing",
+    ))
+
 
 
 @router.get("/download/{file_id}")
 async def download_file(
     file_id: int,
-    user: UserResponse = Depends(get_user_by_telegram_id),
+    user: UserResponse = Depends(get_current_user),
     file_service: FileService = Depends(get_file_service),
 ):
     """
     Скачивает файл из хранилища.
     
-    **Аутентификация:** По Telegram ID (query параметр `telegram_id`)
+    Аутентификация: По Telegram ID
     
     Args:
         file_id: ID файла
-        telegram_id: Telegram ID пользователя (query параметр)
+        user: UserResponse с информацией о пользователе
+        file_service: Сервис для работы с файлами
     
     Returns:
         Файл для скачивания (бинарный поток)
@@ -186,10 +163,8 @@ async def download_file(
         user_id=user.id,
     )
     
-    # Декодируем имя файла, если оно URL-encoded (для старых записей)
     filename = decode_filename(filename)
     
-    # StreamingResponse возвращается напрямую (не оборачивается в ResponseMessage)
     return StreamingResponse(
         io.BytesIO(file_content),
         media_type=content_type,
@@ -202,17 +177,18 @@ async def download_file(
 @router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_file(
     file_id: int,
-    user: UserResponse = Depends(get_user_by_telegram_id),
+    user: UserResponse = Depends(get_current_user),
     file_service: FileService = Depends(get_file_service),
 ):
     """
     Удаляет файл из хранилища и базы данных.
     
-    **Аутентификация:** По Telegram ID (query параметр `telegram_id`)
+    Аутентификация: JWT.
     
     Args:
         file_id: ID файла
-        telegram_id: Telegram ID пользователя (query параметр)
+        user: UserResponse с информацией о пользователе
+        file_service: Сервис для работы с файлами
         
     Raises:
         404: Если пользователь или файл не найден
@@ -222,3 +198,49 @@ async def delete_file(
         file_id=file_id,
         user_id=user.id,
     )
+
+
+@router.patch("/{file_id}/move", response_model=ResponseMessage[FileInfo])
+async def move_file_to_namespace(
+    file_id: int,
+    namespace_id: int = Query(..., description="ID пространства назначения"),
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+) -> ResponseMessage[FileInfo]:
+    """
+    Перемещает файл в указанное пространство.
+    
+    Аутентификация: JWT.
+    
+    Args:
+        file_id: ID файла
+        namespace_id: ID пространства назначения
+        user: UserResponse с информацией о пользователе
+        file_service: Сервис для работы с файлами
+    
+    Returns:
+        ResponseMessage[FileInfo] с информацией о файле
+        
+    Raises:
+        404: Если пользователь, файл или пространство не найдены
+        403: Если нет доступа к файлу или пространству
+    """
+    file_info = await file_service.move_to_namespace(
+        file_id=file_id,
+        namespace_id=namespace_id,
+        user_id=user.id,
+    )
+    return ResponseMessage[FileInfo](
+        message=f"Файл {file_info.user_file_id} перемещен в пространство {namespace_id}",
+        data=FileInfo(
+                user_file_id=file_info.user_file_id,
+                content_file_id=file_info.content_file_id,
+                user_id=file_info.user_id,
+                namespace_id=file_info.namespace_id,
+                filename=file_info.filename,
+                file_type=file_info.file_type,
+                file_size=file_info.file_size,
+                created_at=file_info.created_at,
+                updated_at=file_info.updated_at,
+                file_path=file_info.file_path,
+    ))

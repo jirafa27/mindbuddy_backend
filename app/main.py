@@ -24,7 +24,7 @@ from app.core.middleware import (
 )
 from app.infrastructure.db.base import init_db, setup_async_engine
 from app.api import api_router
-from app.core.dependencies import get_websocket_manager
+from app.core.dependencies import get_intent_classifier
 
 
 @asynccontextmanager
@@ -32,26 +32,17 @@ async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения"""
     setup_async_engine()
     await init_db()
-
-    # Инициализация WebSocketManager с обработкой ошибок
-    websocket_manager = get_websocket_manager()
-    try:
-        await websocket_manager.connect()
-    except Exception as e:
-        # Логируем ошибку, но не останавливаем приложение
-        # WebSocket будет недоступен, но остальные эндпоинты работают
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Failed to connect WebSocketManager to RabbitMQ: {e}")
-        logger.warning("WebSocket эндпоинты будут недоступны до восстановления подключения к RabbitMQ")
     
+    # Предзагрузка sentence-transformers модели (singleton)
+    startup_logger = logging.getLogger(__name__)
+    try:
+        get_intent_classifier()  # Инициализация singleton
+        startup_logger.info("IntentClassifier initialized successfully")
+    except Exception as e:
+        startup_logger.warning(f"IntentClassifier failed to load: {e}. Falling back to keyword matching.")
+
     yield
 
-    # Shutdown: отключение от RabbitMQ и освобождение пула БД
-    try:
-        await asyncio.wait_for(websocket_manager.disconnect(), timeout=5.0)
-    except (Exception, asyncio.TimeoutError):
-        pass
     from app.infrastructure.db.base import engine
     if engine is not None:
         try:

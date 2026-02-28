@@ -61,8 +61,13 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # Кэш моделей (sentence-transformers, Hugging Face) — не качаем при каждом перезапуске
+      SENTENCE_TRANSFORMERS_HOME: /app/.cache
+      HF_HOME: /app/.cache
     volumes:
       - .:/app
+      - model_cache:/app/.cache
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     depends_on:
       db:
@@ -78,8 +83,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      SENTENCE_TRANSFORMERS_HOME: /app/.cache
+      HF_HOME: /app/.cache
     volumes:
       - .:/app
+      - model_cache:/app/.cache
     command: celery -A app.infrastructure.workers.celery_app worker --loglevel=info
     env_file:
       - .env
@@ -94,4 +103,5 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  model_cache:  # Кэш sentence-transformers / Hugging Face — сохраняется между перезапусками
 

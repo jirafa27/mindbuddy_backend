@@ -1,8 +1,9 @@
-"""FileAgent: парсинг файла, чанки, эмбеддинги; сохранение в Storage (Claim Check)."""
 import logging
 from typing import Any
 
-from app.agents.state import AskState
+from langchain_core.runnables import RunnableConfig
+
+from app.graph.state import AskState
 from app.domain.protocols import BlobStorage, EmbeddingProvider
 from app.services.text_chunker import TextChunkerService
 from app.utils.file_readers import FileReaderFactory
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class FileAgent:
-    """Парсит файл, разбивает на чанки, генерирует эмбеддинги; сохраняет данные в BlobStorage (Claim Check)."""
+    """Парсит файл, разбивает на чанки, генерирует эмбеддинги; сохраняет данные в BlobStorage"""
 
     def __init__(
         self,
@@ -27,10 +28,10 @@ class FileAgent:
         self.embedding_service = embedding_service
         self.blob_storage = blob_storage
 
-    async def run(self, state: AskState, config: dict | None = None) -> dict[str, Any]:
+    async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
         """
         Парсит файл, разбивает на чанки, генерирует эмбеддинги.
-        Не сохраняет в БД — это делает DBAgent.
+        Не сохраняет в БД — это делает SaveFileNode.
         """
         file_content = state.get("file_content")
         filename = state.get("filename")

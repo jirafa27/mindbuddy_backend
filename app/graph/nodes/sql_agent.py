@@ -2,7 +2,9 @@
 import logging
 from typing import Any
 
-from app.agents.state import AskState
+from langchain_core.runnables import RunnableConfig
+
+from app.graph.state import AskState
 from app.domain.protocols import LLMProvider
 from app.infrastructure.llm.yandex_completion import LLMCompletionError
 
@@ -86,7 +88,7 @@ class SQLAgent:
     def __init__(self, *, llm_service: LLMProvider):
         self.llm_service = llm_service
 
-    async def run(self, state: AskState, config: dict | None = None) -> dict[str, Any]:
+    async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
         question = state.get("question") or ""
         namespace_id = state.get("namespace_id")
         db_error = state.get("db_error")

@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     YANDEX_EMBED_TIMEOUT: float = 30.0
     YANDEX_COMPLETION_URL: str = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     YANDEX_COMPLETION_TIMEOUT: float = 60.0
+    
+    # Окно контекста модели (YandexGPT Lite, 8B, до 32k токенов)
+    YANDEX_COMPLETION_CONTEXT_TOKENS: int = 32_000
+    YANDEX_SUMMARY_CONTEXT_RESERVE: int = 2000
 
     # Text Chunking
     CHUNK_SIZE: int = 512  # tokens
@@ -44,6 +48,11 @@ class Settings(BaseSettings):
     # File Upload
     MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB
     ALLOWED_FILE_TYPES: list[str] = ["md", "txt", "pdf", "docx"]
+
+    # User-Agent для yt_dlp (опционально)
+    USER_AGENT: Optional[str] = None
+    # IPv4-прокси для yt-dlp (YouTube), например http://user:pass@host:port
+    YOUTUBE_PROXY: Optional[str] = None
 
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"

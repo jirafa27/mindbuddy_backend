@@ -1,27 +1,33 @@
 from functools import lru_cache
-from typing import Callable
-from fastapi import Depends, Query
+from fastapi import Depends, Query, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from app.core.security import decode_access_token
 
 from app.domain.protocols import (
-    AsyncFileRepository,
+    UserFileRepository,
+    FileRepository,
     BlobStorage,
     EmbeddingProvider,
+    TaskPublisher,
     FileStorage,
     NamespaceRepository,
+    UserRepository,
     VectorRepository,
-    WatcherTaskPublisher,
+    SummaryRepository,
     LLMProvider,
 )
 from app.infrastructure.db.session import get_db
 from app.schemas.user import UserResponse
 from app.infrastructure.repositories import (
-    UserRepository,
-    NamespaceRepository,
-    AsyncFileRepository,
-    PgVectorRepository,
+    PgFileRepository,
+    PgUserFileRepository,
+    PgNamespaceRepository,
+    PgUserRepository,
+    PgSummaryRepository,
 )
+from app.infrastructure.repositories.vector_embedding_repository import PgVectorRepository
 from app.services.text_chunker import TextChunkerService
 from app.infrastructure.llm.yandex_embedding import YandexEmbeddingService
 from app.infrastructure.llm.yandex_completion import YandexCompletionService
@@ -29,36 +35,44 @@ from app.services.file_service import FileService
 from app.infrastructure.llm.yandex_iam import YandexIAMService
 from app.services.user_service import UserService
 from app.services.namespace_service import NamespaceService
-from app.infrastructure.message_broker.rabbitmq import RabbitMQService
 from app.infrastructure.storage.minio import MinIOStorage
-from app.services.websocket_manager import WebSocketManager
 from app.services.search_service import SearchService
 from app.utils.file_readers import FileReaderFactory
 from app.core.config import settings
-from app.core.exceptions import NotFoundError
 from app.services.chat_service import ChatService
+from app.services.content_extractor import ContentExtractorService
+from app.services.summary_service import SummaryService
+from app.graph.nodes.summary_agent import SummaryAgent
+from app.services.intent_classifier import IntentClassifier
+from app.infrastructure.workers.celery_app import celery_app
+from app.infrastructure.workers.task_manager import TaskManager
 
 
 
 
-def get_file_repository(db: AsyncSession = Depends(get_db)) -> AsyncFileRepository:
-    """Провайдер для AsyncFileRepository"""
-    return AsyncFileRepository(db)
+def get_file_repository(db: AsyncSession = Depends(get_db)) -> FileRepository:
+    """Провайдер для FileRepository. Возвращает протокол, создаёт Pg-реализацию."""
+    return PgFileRepository(db)
+
+
+def get_user_file_repository(db: AsyncSession = Depends(get_db)) -> UserFileRepository:
+    """Провайдер для UserFileRepository. Возвращает протокол, создаёт Pg-реализацию."""
+    return PgUserFileRepository(db)
 
 
 def get_namespace_repository(db: AsyncSession = Depends(get_db)) -> NamespaceRepository:
-    """Провайдер для NamespaceRepository"""
-    return NamespaceRepository(db)
+    """Провайдер для NamespaceRepository. Возвращает протокол, создаёт Pg-реализацию."""
+    return PgNamespaceRepository(db)
 
 
 def get_vector_repository(db: AsyncSession = Depends(get_db)) -> VectorRepository:
-    """Провайдер для VectorRepository"""
+    """Провайдер для VectorRepository. Возвращает протокол, создаёт Pg-реализацию."""
     return PgVectorRepository(db)
 
 
 def get_user_repository(db: AsyncSession = Depends(get_db)) -> UserRepository:
-    """Провайдер для UserRepository"""
-    return UserRepository(db)
+    """Провайдер для UserRepository. Возвращает протокол, создаёт Pg-реализацию."""
+    return PgUserRepository(db)
 
 @lru_cache
 def get_file_reader_factory() -> FileReaderFactory:
@@ -89,6 +103,15 @@ def get_text_chunker_service() -> TextChunkerService:
     return TextChunkerService()
 
 
+@lru_cache
+def get_intent_classifier() -> IntentClassifier:
+    """
+    Провайдер для IntentClassifier (singleton).
+    Модель sentence-transformers загружается один раз при первом вызове.
+    """
+    return IntentClassifier()
+
+
 def get_llm_provider(iam_service: YandexIAMService = Depends(get_yandex_iam_service)) -> LLMProvider:
     """Провайдер для LLM (completion). Использует общий IAM сервис."""
     return YandexCompletionService(iam_service=iam_service)
@@ -110,7 +133,8 @@ def get_storage_service() -> FileStorage:
 
 def get_file_service(
     storage: FileStorage = Depends(get_storage_service),
-    file_repository: AsyncFileRepository = Depends(get_file_repository),
+    user_file_repository: UserFileRepository = Depends(get_user_file_repository),
+    file_repository: FileRepository = Depends(get_file_repository),
     file_reader_factory: FileReaderFactory = Depends(get_file_reader_factory),
     vector_repository: VectorRepository = Depends(get_vector_repository),
     text_chunker: TextChunkerService = Depends(get_text_chunker_service),
@@ -118,12 +142,10 @@ def get_file_service(
     namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
     db: AsyncSession = Depends(get_db),
 ) -> FileService:
-    """
-    Провайдер для FileService. Зависит от Storage, AsyncFileRepository, сессии БД и др.
-    """
     return FileService(
         storage=storage,
         file_repository=file_repository,
+        user_file_repository=user_file_repository,
         file_reader_factory=file_reader_factory,
         vector_repository=vector_repository,
         text_chunker=text_chunker,
@@ -133,46 +155,30 @@ def get_file_service(
     )
 
 
-def create_file_service_for_celery(db: Session) -> FileService:
-    """
-    Фабрика FileService для Celery: синхронная сессия, commit делает воркер снаружи.
-    Сессия db не передаётся в сервис (self.db = None), транзакцией управляет воркер.
-    """
+def create_file_service_for_celery(db: AsyncSession) -> FileService:
+    """Создаёт FileService для Celery воркеров."""
     return FileService(
         storage=get_storage_service(),
-        file_repository=None,
+        file_repository=PgFileRepository(db),
+        user_file_repository=PgUserFileRepository(db),
         file_reader_factory=get_file_reader_factory(),
         vector_repository=PgVectorRepository(db),
         text_chunker=get_text_chunker_service(),
         embedding_service=get_embedding_service(get_yandex_iam_service()),
-        namespace_repository=None,
-        db=None,
+        namespace_repository=PgNamespaceRepository(db),
+        db=db,
     )
 
 
-def get_rabbitmq_service() -> WatcherTaskPublisher:
-    """
-    Провайдер для публикации задач в очередь (Watcher).
-    НЕ кэшируется: создает новое подключение в каждом методе.
-    """
-    return RabbitMQService()
-
-
-@lru_cache
-def get_websocket_manager() -> WebSocketManager:
-    """
-    Провайдер для WebSocketManager.
-    Кэшируется глобально (singleton): один менеджер для всего приложения.
-    """
-    return WebSocketManager()
 
 
 def get_user_service(
     db: AsyncSession = Depends(get_db),
     repository: UserRepository = Depends(get_user_repository),
+    namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
 ) -> UserService:
     """Провайдер для UserService"""
-    return UserService(repository, db)
+    return UserService(repository, db, namespace_repository)
 
 
 def get_namespace_service(
@@ -183,12 +189,25 @@ def get_namespace_service(
     return NamespaceService(namespace_repository, db)
 
 
-async def get_user_by_telegram_id(
-    telegram_id: int = Query(..., description="Telegram ID пользователя"),
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=True)),
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
-    """Dependency: пользователь по Telegram ID (UserResponse). NotFoundError если не найден."""
-    return await user_service.get_user_by_telegram_id(telegram_id)
+    """Текущий пользователь по JWT из заголовка Authorization: Bearer <token>."""
+    token = credentials.credentials
+    user_id = decode_access_token(token)
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Недействительный или истёкший токен",
+        )
+    user = await user_service.get_user(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Пользователь не найден",
+        )
+    return user
 
 
 async def get_user_by_watcher_token(
@@ -199,10 +218,11 @@ async def get_user_by_watcher_token(
     return await user_service.get_user_by_watcher_token(token)
 
 
-@lru_cache
-def get_search_service_factory() -> Callable[[AsyncSession], SearchService]:
-    """Фабрика SearchService по сессии (для графа /ask)."""
-    return lambda db: SearchService(db)
+def get_search_service(
+    vector_repository: VectorRepository = Depends(get_vector_repository),
+) -> SearchService:
+    """Провайдер для SearchService. Векторный репозиторий внедряется через конструктор."""
+    return SearchService(vector_repository=vector_repository)
 
 
 def get_blob_storage() -> BlobStorage:
@@ -210,21 +230,95 @@ def get_blob_storage() -> BlobStorage:
     return _get_minio_storage()
 
 
+def get_summary_repository(db: AsyncSession = Depends(get_db)) -> SummaryRepository:
+    """Провайдер для SummaryRepository. Возвращает протокол, создаёт Pg-реализацию."""
+    return PgSummaryRepository(db)
+
+
+def get_content_extractor() -> ContentExtractorService:
+    """Провайдер для ContentExtractorService."""
+    return ContentExtractorService()
+
+
+def get_summary_agent(
+    llm_service: LLMProvider = Depends(get_llm_provider),
+    text_chunker: TextChunkerService = Depends(get_text_chunker_service),
+) -> SummaryAgent:
+    """Провайдер для SummaryAgent."""
+    return SummaryAgent(llm_service=llm_service, text_chunker=text_chunker)
+
+
+def get_summary_service(
+    db: AsyncSession = Depends(get_db),
+    user_file_repository: UserFileRepository = Depends(get_user_file_repository),
+    file_repository: FileRepository = Depends(get_file_repository),
+    summary_repository: SummaryRepository = Depends(get_summary_repository),
+    content_extractor: ContentExtractorService = Depends(get_content_extractor),
+    file_service: FileService = Depends(get_file_service),
+) -> SummaryService:
+    """Провайдер для SummaryService (без агента; дирижёр вызывает агента отдельно)."""
+    return SummaryService(
+        db=db,
+        user_file_repository=user_file_repository,
+        file_repository=file_repository,
+        summary_repository=summary_repository,
+        file_service=file_service,
+        content_extractor=content_extractor,
+    )
+
+
+def create_summary_service_for_celery(db: AsyncSession) -> SummaryService:
+    """Создаёт SummaryService для Celery воркеров (без агента)."""
+    file_service = create_file_service_for_celery(db)
+    return SummaryService(
+        db=db,
+        user_file_repository=PgUserFileRepository(db),
+        file_repository=PgFileRepository(db),
+        summary_repository=PgSummaryRepository(db),
+        file_service=file_service,
+        content_extractor=ContentExtractorService(),
+    )
+
+
+
+@lru_cache
+def get_task_publisher() -> TaskPublisher:
+    """Провайдер постановки фоновых задач (Celery)."""
+    return TaskManager(celery_app)
+
+
 def get_chat_service(
+    db: AsyncSession = Depends(get_db),
+    file_repository: FileRepository = Depends(get_file_repository),
+    vector_repository: VectorRepository = Depends(get_vector_repository),
+    search_service: SearchService = Depends(get_search_service),
+    summary_service: SummaryService = Depends(get_summary_service),
+    summary_agent: SummaryAgent = Depends(get_summary_agent),
     file_reader_factory: FileReaderFactory = Depends(get_file_reader_factory),
     text_chunker: TextChunkerService = Depends(get_text_chunker_service),
     embedding_service: EmbeddingProvider = Depends(get_embedding_service),
     file_service: FileService = Depends(get_file_service),
     llm_service: LLMProvider = Depends(get_llm_provider),
-    search_service_factory: Callable[[AsyncSession], SearchService] = Depends(get_search_service_factory),
     blob_storage: BlobStorage = Depends(get_blob_storage),
+    intent_classifier: IntentClassifier = Depends(get_intent_classifier),
+    content_extractor: ContentExtractorService = Depends(get_content_extractor),
+    task_publisher: TaskPublisher = Depends(get_task_publisher),
 ) -> ChatService:
+    """Провайдер для ChatService"""
     return ChatService(
+        db=db,
+        file_repository=file_repository,
+        vector_repository=vector_repository,
+        search_service=search_service,
+        summary_service=summary_service,
+        summary_agent=summary_agent,
         file_reader_factory=file_reader_factory,
         text_chunker=text_chunker,
         embedding_service=embedding_service,
         file_service=file_service,
         llm_service=llm_service,
-        search_service_factory=search_service_factory,
         blob_storage=blob_storage,
+        intent_classifier=intent_classifier,
+        content_extractor=content_extractor,
+        task_publisher=task_publisher,
     )

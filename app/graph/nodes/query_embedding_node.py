@@ -1,7 +1,9 @@
 """Узел вычисления query_embedding по question (для векторного поиска)."""
 from typing import Any
 
-from app.agents.state import AskState
+from langchain_core.runnables import RunnableConfig
+
+from app.graph.state import AskState
 from app.domain.protocols import EmbeddingProvider
 
 
@@ -11,7 +13,7 @@ class QueryEmbeddingNode:
     def __init__(self, *, embedding_service: EmbeddingProvider):
         self.embedding_service = embedding_service
 
-    async def run(self, state: AskState, config: dict | None = None) -> dict[str, Any]:
+    async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
         question = state.get("question") or ""
         if not question.strip():
             return {}

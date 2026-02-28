@@ -37,3 +37,8 @@ class FileTooLargeError(AppException):
     """Файл слишком большой"""
     default_message = "File size exceeds maximum allowed size"
 
+
+class ContentExtractionError(AppException):
+    """Ошибка извлечения контента (YouTube, веб-страницы)"""
+    default_message = "Failed to extract content from URL"
+

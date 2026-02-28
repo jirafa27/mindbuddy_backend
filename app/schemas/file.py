@@ -39,14 +39,16 @@ class FileResponse(BaseModel):
     filename: str
     task_id: str
     status: str = "processing"
+    message: Optional[str] = None  # Например: "Не удалось получить текст видео, сохранены только метаданные"
 
     class Config:
         from_attributes = True
 
 
 class FileInfo(BaseModel):
-    """Полная информация о файле (в т.ч. file_path для URL или удаления)."""
-    id: int
+    """Полная информация о файле"""
+    user_file_id: int
+    content_file_id: int 
     user_id: int
     namespace_id: Optional[int] = None
     filename: str
@@ -67,11 +69,38 @@ class FileProcessingResult(BaseModel):
     status: str = "success"
 
 
+class DeduplicationResult(BaseModel):
+    """Результат проверки дедупликации."""
+    is_duplicate: bool
+    existing_file_id: Optional[int] = None
+
+
 class FileCreated(BaseModel):
-    """Данные о созданном файле (без task_id)"""
-    file_id: int
+    """Данные о созданном файле"""
+    file_id: int  # UserFile.id (для ответа и задач)
+    content_file_id: int  # File.id (для эмбеддингов и суммаризации)
     filename: str
     text: str  # Текст для передачи в Celery задачу
+
+
+class IngestUrlResult(BaseModel):
+    """Результат индексации URL (без суммаризации)."""
+    file_id: int
+    content_file_id: int
+    filename: str
+    text: str
+    is_duplicate: bool = False
+    message: Optional[str] = None
+
+
+class ProcessUserLinkResult(BaseModel):
+    """Результат добавления ссылки пользователем (content deduplication flow)."""
+    user_file_id: int
+    content_file_id: int
+    custom_title: str
+    is_cache_hit: bool
+    processing_status: str
+    text: Optional[str] = None
 
 
 class FileInNamespace(BaseModel):
@@ -98,20 +127,6 @@ class FileWithUrl(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class WatcherTaskResponse(BaseModel):
-    """Схема ответа с задачей для Watcher"""
-    action: str = Field(..., description="Тип действия (например, 'download_and_sync')")
-    file_id: int = Field(..., description="ID файла на сервере")
-    user_id: int = Field(..., description="ID пользователя")
-    filename: str = Field(..., description="Имя файла")
-    file_type: str = Field(..., description="Тип файла (расширение)")
-    file_size: int = Field(..., description="Размер файла в байтах")
-    download_url: str = Field(..., description="Presigned URL для скачивания")
-    local_path: Optional[str] = Field(None, description="Желаемый путь на диске (опционально)")
-    status: str = Field(default="pending", description="Статус задачи")
-
 
 class FileStructureItem(BaseModel):
     """Элемент структуры: один файл (для watcher)"""

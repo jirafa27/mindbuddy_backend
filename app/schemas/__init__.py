@@ -9,7 +9,7 @@ from app.schemas.file import (
     FileWithUrl,
     SyncToLocalRequest,
     SyncToLocalResponse,
-    WatcherTaskResponse,
+    DeduplicationResult,
 )
 from app.schemas.namespace import (
     NamespaceCreate,
@@ -27,6 +27,12 @@ from app.schemas.base import (
     ResponseMessage,
     ListResponseData,
 )
+from app.schemas.summary import (
+    SummaryRequest,
+    SummaryResponse,
+    SummaryInfo,
+    SummaryCreateResult,
+)
 
 __all__ = [
     "FileUploadRequest",
@@ -39,7 +45,7 @@ __all__ = [
     "FileWithUrl",
     "SyncToLocalRequest",
     "SyncToLocalResponse",
-    "WatcherTaskResponse",
+    "DeduplicationResult",
     "NamespaceCreate",
     "NamespaceUpdate",
     "NamespaceResponse",
@@ -50,5 +56,9 @@ __all__ = [
     "PaginationInfo",
     "ResponseMessage",
     "ListResponseData",
+    "SummaryRequest",
+    "SummaryResponse",
+    "SummaryInfo",
+    "SummaryCreateResult",
 ]
 
