@@ -14,12 +14,21 @@ class QueryEmbeddingNode:
         self.embedding_service = embedding_service
 
     async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
+        # Если пользователь выбрал конкретные файлы, используем полный вопрос —
+        # search_query вроде "файлы" слишком короткий и даёт нерелевантные результаты.
+        # В остальных случаях search_query имеет приоритет как очищенный LLM-термин.
+        search_query = state.get("search_query") or ""
         question = state.get("question") or ""
-        if not question.strip():
+        search_file_ids = state.get("search_file_ids")
+        if search_file_ids and len(search_query.split()) <= 2:
+            text_to_embed = question or search_query
+        else:
+            text_to_embed = search_query or question
+        if not text_to_embed.strip():
             return {}
 
         try:
-            query_embedding = await self.embedding_service.generate_query_embedding(question)
+            query_embedding = await self.embedding_service.generate_query_embedding(text_to_embed)
             return {"query_embedding": query_embedding}
         except Exception:
             return {"query_embedding": []}

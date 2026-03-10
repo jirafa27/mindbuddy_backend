@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Integer, BigInteger, DateTime, JSON, ForeignKey, Text, Boolean, UniqueConstraint
+from sqlalchemy import String, Integer, BigInteger, DateTime, JSON, ForeignKey, Text, Boolean, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 from app.infrastructure.db.base import Base
@@ -25,6 +25,7 @@ class User(Base):
 
     namespaces: Mapped[list["Namespace"]] = relationship("Namespace", back_populates="user")
     user_files: Mapped[list["UserFile"]] = relationship("UserFile", back_populates="user")
+    chats: Mapped[list["Chat"]] = relationship("Chat", back_populates="user")
 
 
 class Namespace(Base):
@@ -75,7 +76,21 @@ class File(Base):
 class UserFile(Base):
     __tablename__ = "user_files"
     __table_args__ = (
-        UniqueConstraint("user_id", "file_id", name="uq_user_file"),
+        # Два частичных уникальных индекса вместо одного:
+        # 1) для файлов без пространства (namespace_id IS NULL)
+        Index(
+            "uq_user_file_no_ns",
+            "user_id", "file_id",
+            unique=True,
+            postgresql_where="namespace_id IS NULL",
+        ),
+        # 2) для файлов в конкретном пространстве (namespace_id IS NOT NULL)
+        Index(
+            "uq_user_file_with_ns",
+            "user_id", "file_id", "namespace_id",
+            unique=True,
+            postgresql_where="namespace_id IS NOT NULL",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -110,7 +125,7 @@ class VectorEmbedding(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding = mapped_column(
-        Vector(256), nullable=False
+        Vector(3584), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
@@ -145,3 +160,42 @@ class Summary(Base):
     @property
     def content(self) -> str:
         return self.text
+
+
+class Chat(Base):
+    __tablename__ = "chats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    pending_action: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="chats")
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        "ChatMessage", back_populates="chat", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
+    )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    chat_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("chats.id"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)  # user | assistant
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    file_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+    chat: Mapped["Chat"] = relationship("Chat", back_populates="messages")

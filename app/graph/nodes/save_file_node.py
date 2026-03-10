@@ -42,6 +42,7 @@ class SaveFileNode:
         filename = state.get("filename")
         namespace_id = state.get("namespace_id")
         user_id = state.get("user_id")
+        search_query = state.get("search_query")
 
         if not (blob_key and file_content and filename and user_id is not None and file_repository is not None):
             return {"agent_steps": agent_steps}
@@ -61,12 +62,73 @@ class SaveFileNode:
                     "agent_steps": agent_steps,
                 }
 
+            content_hash = self.file_service.compute_content_hash(file_content)
             file_created = await self.file_service.upload_file(
                 file_content=file_content,
                 filename=filename,
                 namespace_id=namespace_id,
                 user_id=user_id,
+                content_hash=content_hash,
             )
+
+            ns_hint = state.get("namespace_name_hint")
+            ns_part = f" в пространство «{ns_hint or namespace_id}»" if namespace_id else ""
+
+            if not file_created.is_new_file:
+                if not file_created.is_new_user_file:
+                    # user_file уже существует в этом namespace — полный дубликат
+                    logger.info(
+                        "SaveFileNode: full duplicate (user_file_id=%d, content_file_id=%d), skipping",
+                        file_created.file_id, file_created.content_file_id,
+                    )
+                    await self.blob_storage.delete_blob(blob_key)
+                    already_msg = (
+                        f"Файл «{filename}» уже есть в пространстве «{ns_hint or namespace_id}»."
+                        if namespace_id else
+                        f"Файл «{filename}» уже есть в базе знаний."
+                    )
+                    result: dict = {
+                        "file_id": file_created.file_id,
+                        "search_file_ids": [file_created.file_id],
+                        "blob_key": None,
+                        "agent_steps": agent_steps,
+                    }
+                    if search_query:
+                        result["file_save_notice"] = already_msg
+                    else:
+                        result["answer"] = already_msg
+                    return result
+                # Новый user_file, но контент уже существует — создаём эмбеддинги для нового namespace
+                logger.info(
+                    "SaveFileNode: new UserFile for existing content (user_file_id=%d, content_file_id=%d), creating embeddings",
+                    file_created.file_id, file_created.content_file_id,
+                )
+                if vector_repository is not None:
+                    await vector_repository.create_batch(
+                        file_id=file_created.content_file_id,
+                        chunks=chunks,
+                        embeddings=embeddings,
+                        namespace_id=namespace_id,
+                    )
+                    if async_db:
+                        await async_db.commit()
+                await self.blob_storage.delete_blob(blob_key)
+                existing_msg = (
+                    f"Файл «{filename}» уже есть в базе знаний и был добавлен в пространство «{ns_hint or namespace_id}»."
+                    if namespace_id else
+                    f"Файл «{filename}» уже есть в базе знаний."
+                )
+                result2: dict = {
+                    "file_id": file_created.file_id,
+                    "search_file_ids": [file_created.file_id],
+                    "blob_key": None,
+                    "agent_steps": agent_steps,
+                }
+                if search_query:
+                    result2["file_save_notice"] = existing_msg
+                else:
+                    result2["answer"] = existing_msg
+                return result2
 
             if vector_repository is None:
                 return {
@@ -84,11 +146,18 @@ class SaveFileNode:
                 await async_db.commit()
             await self.blob_storage.delete_blob(blob_key)
 
-            return {
+            saved_msg = f"Файл «{filename}» сохранён{ns_part}."
+            result3: dict = {
                 "file_id": file_created.file_id,
+                "search_file_ids": [file_created.file_id],
                 "blob_key": None,
                 "agent_steps": agent_steps,
             }
+            if search_query:
+                result3["file_save_notice"] = saved_msg
+            else:
+                result3["answer"] = saved_msg
+            return result3
         except Exception as e:
             logger.exception("SaveFileNode failed")
             return {

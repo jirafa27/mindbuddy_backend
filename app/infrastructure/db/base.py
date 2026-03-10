@@ -5,6 +5,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -29,6 +30,26 @@ def setup_async_engine() -> None:
         settings.DATABASE_URL,
         echo=settings.DEBUG,
         future=True,
+    )
+    AsyncSessionLocal = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+
+def setup_async_engine_for_celery() -> None:
+    """Создать engine с NullPool для Celery-воркеров.
+
+    В воркерах каждый asyncio.run() создаёт новый event loop, из-за чего
+    asyncpg-соединения из пула оказываются привязаны к старому loop и выбрасывают
+    InterfaceError. NullPool полностью отключает переиспользование соединений:
+    каждая сессия открывает и закрывает соединение самостоятельно.
+    """
+    global engine, AsyncSessionLocal
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=settings.DEBUG,
+        future=True,
+        poolclass=NullPool,
     )
     AsyncSessionLocal = async_sessionmaker(
         engine, expire_on_commit=False, class_=AsyncSession

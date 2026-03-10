@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     YANDEX_COMPLETION_CONTEXT_TOKENS: int = 32_000
     YANDEX_SUMMARY_CONTEXT_RESERVE: int = 2000
 
+    # Ollama (локальный LLM + эмбеддинги)
+    OLLAMA_BASE_URL: str = "http://ollama:11434"
+    OLLAMA_LLM_MODEL: str = "qwen2.5:7b"
+    OLLAMA_EMBED_MODEL: str = "qwen2.5:7b"
+    OLLAMA_EMBED_DIM: int = 3584
+    OLLAMA_TIMEOUT: float = 120.0
+
     # Text Chunking
     CHUNK_SIZE: int = 512  # tokens
     CHUNK_OVERLAP: int = 50  # tokens overlap between chunks
@@ -57,7 +64,7 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30 * 24 * 60
 
     class Config:
         env_file = ".env"

@@ -7,7 +7,16 @@ from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.protocols import EmbeddingProvider, FileStorage, VectorRepository, NamespaceRepository, FileRepository, UserFileRepository
+from app.domain.protocols import (
+    EmbeddingProvider,
+    FileStorage,
+    VectorRepository,
+    NamespaceRepository,
+    FileRepository,
+    UserFileRepository,
+    SummaryRepository,
+    TaskPublisher,
+)
 from app.infrastructure.db.models import UserFile
 from app.schemas.file import FileCreated, FileProcessingResult, FileInfo, DeduplicationResult, ProcessUserLinkResult
 from app.core.config import settings
@@ -37,6 +46,8 @@ class FileService:
         db: Optional[AsyncSession] = None,
         file_repository: Optional[FileRepository] = None,
         user_file_repository: Optional[UserFileRepository] = None,
+        summary_repository: Optional[SummaryRepository] = None,
+        task_publisher: Optional[TaskPublisher] = None,
     ):
         """
         Args:
@@ -49,10 +60,14 @@ class FileService:
             namespace_repository: Репозиторий пространств (для валидации).
             db: Сессия БД (для API — из Depends(get_db); для Celery — None).
             user_file_repository: AsyncUserFileRepository для process_user_link.
+            summary_repository: Для инвалидации суммаризации при replace (опционально).
+            task_publisher: Для постановки задачи эмбеддингов при replace (опционально).
         """
         self.storage = storage
         self.file_reader_factory = file_reader_factory
         self.vector_repository = vector_repository
+        self.summary_repository = summary_repository
+        self.task_publisher = task_publisher
         self.text_chunker = text_chunker
         self.embedding_service = embedding_service
         self.namespace_repository = namespace_repository
@@ -84,32 +99,31 @@ class FileService:
         content_hash: Optional[str] = None,
     ) -> DeduplicationResult:
         """
-        Проверяет, существует ли файл с таким URL или хэшем.
+        Проверяет, существует ли файл с таким URL или хэшем у пользователя.
         
         Args:
             user_id: ID пользователя
             source_url: URL источника (для YouTube/HTML)
             content_hash: SHA-256 хэш контента
-            file_repository: Репозиторий файлов (опционально)
             
         Returns:
-            DeduplicationResult с информацией о дубликате
+            DeduplicationResult с информацией о дубликате (existing_file_id — id user_file)
         """
-        if not self.file_repository:
-            raise ValueError("File repository is required for deduplication check")
+        if not self.user_file_repository:
+            raise ValueError("User file repository is required for deduplication check")
         
         # Сначала проверяем по URL (быстрее)
         if source_url:
-            existing = await self.file_repository.find_by_source_url(source_url, user_id)
-            if existing:    
-                logger.info("[Deduplication] Found existing file for URL: %s (file_id=%d)", source_url, existing.id)
+            existing = await self.user_file_repository.find_by_source_url(source_url, user_id)
+            if existing:
+                logger.info("[Deduplication] Found existing file for URL: %s (user_file_id=%d)", source_url, existing.id)
                 return DeduplicationResult(is_duplicate=True, existing_file_id=existing.id)
         
         # Затем по хэшу контента
         if content_hash:
-            existing = await self.file_repository.find_by_content_hash(content_hash, user_id)
+            existing = await self.user_file_repository.find_by_content_hash(content_hash, user_id)
             if existing:
-                logger.info("[Deduplication] Found existing file for hash: %s (file_id=%d)", content_hash[:16], existing.id)
+                logger.info("[Deduplication] Found existing file for hash: %s (user_file_id=%d)", content_hash[:16], existing.id)
                 return DeduplicationResult(is_duplicate=True, existing_file_id=existing.id)
         
         return DeduplicationResult(is_duplicate=False)
@@ -438,12 +452,21 @@ class FileService:
         """
         ch = content_hash or f"upload:{hashlib.sha256(object_name.encode()).hexdigest()[:32]}"
         try:
-            content_file = await self.file_repository.create(
-                content_hash=ch,
-                file_path=object_name,
-                media_metadata={"title": filename, "file_type": file_ext},
-                processing_status="completed",
-            )
+            existing_content_file = await self.file_repository.get_by_content_hash(ch)
+            if existing_content_file:
+                logger.info("Reusing existing File record (content_hash=%s, id=%s)", ch[:16], existing_content_file.id)
+                content_file = existing_content_file
+                try:
+                    await self.storage.delete_file(object_name)
+                except Exception:
+                    pass
+            else:
+                content_file = await self.file_repository.create(
+                    content_hash=ch,
+                    file_path=object_name,
+                    media_metadata={"title": filename, "file_type": file_ext},
+                    processing_status="completed",
+                )
             user_file = await self.user_file_repository.create(
                 user_id=user_id,
                 file_id=content_file.id,
@@ -492,6 +515,51 @@ class FileService:
         file_ext = await self._validate_upload_params(
             filename, file_content, user_id, namespace_id
         )
+
+        # Вычисляем хэш от содержимого заранее, чтобы поймать дубликат до загрузки в MinIO
+        ch = content_hash or self.compute_content_hash(file_content)
+
+        if self.file_repository and self.user_file_repository:
+            existing_content_file = await self.file_repository.get_by_content_hash(ch)
+            if existing_content_file:
+                # File уже существует — пропускаем MinIO и создание File.
+                # Пробуем создать UserFile (может быть новое пространство).
+                # Из-за ограничения uq_user_file(user_id, file_id) у пользователя не может быть
+                # двух UserFile на один File, поэтому если запись уже есть — просто возвращаем её.
+                is_new_user_file = True
+                try:
+                    user_file = await self.user_file_repository.create(
+                        user_id=user_id,
+                        file_id=existing_content_file.id,
+                        namespace_id=namespace_id,
+                        custom_title=filename,
+                    )
+                    await self.db.commit()
+                    logger.info(
+                        "Reused existing File, created new UserFile: user_file_id=%d, content_file_id=%d (hash=%s)",
+                        user_file.id, existing_content_file.id, ch[:16],
+                    )
+                except Exception:
+                    await self.db.rollback()
+                    user_file = await self.user_file_repository.find_by_user_and_file(
+                        user_id, existing_content_file.id, namespace_id
+                    )
+                    if user_file is None:
+                        raise
+                    is_new_user_file = False
+                    logger.info(
+                        "Duplicate upload: reusing existing UserFile user_file_id=%d, content_file_id=%d (hash=%s)",
+                        user_file.id, existing_content_file.id, ch[:16],
+                    )
+                return FileCreated(
+                    file_id=user_file.id,
+                    content_file_id=existing_content_file.id,
+                    filename=user_file.custom_title or filename,
+                    text="",
+                    is_new_file=False,
+                    is_new_user_file=is_new_user_file,
+                )
+
         text = self._extract_text_from_file(file_content, file_ext)
         if not text or not text.strip():
             raise ValidationError("File content is empty or could not be processed")
@@ -506,7 +574,7 @@ class FileService:
             namespace_id=namespace_id,
             filename=filename,
             file_ext=file_ext,
-            content_hash=content_hash,
+            content_hash=ch,
         )
 
         return FileCreated(
@@ -514,6 +582,7 @@ class FileService:
             content_file_id=user_file.file_id,
             filename=user_file.custom_title or filename,
             text=text,
+            is_new_file=True,
         )
 
     async def create_file_from_text(
@@ -554,7 +623,6 @@ class FileService:
             filename=filename,
             namespace_id=namespace_id,
             user_id=user_id,
-            file_repository=file_repository,
         )
 
     async def process_file(
@@ -626,9 +694,13 @@ class FileService:
         if self.db is None or not self.file_repository or not self.user_file_repository:
             raise ValidationError("DB session, file_repository and user_file_repository are required")
 
-        filename = self.sanitize_filename(f"{title}.md")
+        # S3/MinIO metadata допускает только строки (ASCII); content_type может прийти как enum ContentType
+        content_type_str = content_type.value if hasattr(content_type, "value") else str(content_type)
+
+        # Используем ASCII-имя для ключа S3/MinIO (кириллица в ключе может ломать загрузку)
+        safe_name = f"content_{content_hash[:16]}.md"
         text_bytes = text.encode("utf-8")
-        object_name = self.storage.generate_object_name(user_id, namespace_id, filename)
+        object_name = self.storage.generate_object_name(user_id, namespace_id, safe_name)
         try:
             await self.storage.upload_file(
                 file_content=text_bytes,
@@ -637,7 +709,7 @@ class FileService:
                 metadata={
                     "user_id": str(user_id),
                     "source_url": source_url,
-                    "content_type": content_type,
+                    "content_type": content_type_str,
                 },
             )
             logger.info("[FileService] Saved extracted content to MinIO: %s", object_name)
@@ -645,14 +717,18 @@ class FileService:
             raise ValidationError(f"Failed to upload to storage: {e}")
 
         try:
-            content_file = await self.file_repository.create(
-                content_hash=content_hash,
-                source_url=source_url,
-                transcript_text=text,
-                file_path=object_name,
-                media_metadata={"title": title, "content_type": content_type},
-                processing_status="completed",
-            )
+            content_file = await self.file_repository.get_by_content_hash(content_hash)
+            if content_file is None:
+                content_file = await self.file_repository.create(
+                    content_hash=content_hash,
+                    source_url=source_url,
+                    transcript_text=text,
+                    file_path=object_name,
+                    media_metadata={"title": title, "content_type": content_type_str},
+                    processing_status="completed",
+                )
+            else:
+                logger.info("[FileService] Reusing existing file record: file_id=%d, hash=%s", content_file.id, content_hash[:16])
             user_file = await self.user_file_repository.create(
                 user_id=user_id,
                 file_id=content_file.id,
@@ -670,6 +746,129 @@ class FileService:
             except Exception:
                 pass
             raise ValidationError(f"Failed to save to database: {e}")
+
+    async def save_unattached_content(
+        self,
+        text: str,
+        title: str,
+        source_url: str,
+        content_hash: str,
+        content_type: str,
+        user_id: int,
+    ):
+        """
+        Сохраняет извлечённый контент без привязки к пользователю: создаёт File и загружает в MinIO,
+        но НЕ создаёт запись UserFile. Файл можно позже привязать к пространству через attach.
+
+        Returns:
+            FileEntity созданного (или уже существующего) контент-файла.
+        """
+        if self.db is None or not self.file_repository:
+            raise ValidationError("DB session и file_repository обязательны")
+
+        existing = await self.file_repository.get_by_content_hash(content_hash)
+        if existing:
+            logger.info("[FileService] Unattached: reusing existing file by hash (file_id=%d)", existing.id)
+            return existing
+
+        existing_by_url = await self.file_repository.get_by_source_url(source_url)
+        if existing_by_url:
+            logger.info("[FileService] Unattached: reusing existing file by URL (file_id=%d)", existing_by_url.id)
+            return existing_by_url
+
+        content_type_str = content_type.value if hasattr(content_type, "value") else str(content_type)
+        safe_name = f"content_{content_hash[:16]}.md"
+        text_bytes = text.encode("utf-8")
+        object_name = self.storage.generate_object_name(user_id, None, safe_name)
+
+        try:
+            await self.storage.upload_file(
+                file_content=text_bytes,
+                object_name=object_name,
+                content_type="text/markdown",
+                metadata={
+                    "user_id": str(user_id),
+                    "source_url": source_url,
+                    "content_type": content_type_str,
+                },
+            )
+            logger.info("[FileService] Unattached content uploaded to MinIO: %s", object_name)
+        except Exception as e:
+            raise ValidationError(f"Не удалось загрузить файл в хранилище: {e}")
+
+        try:
+            content_file = await self.file_repository.create(
+                content_hash=content_hash,
+                source_url=source_url,
+                transcript_text=text,
+                file_path=object_name,
+                media_metadata={"title": title, "content_type": content_type_str},
+                processing_status="completed",
+            )
+            await self.db.commit()
+            logger.info("[FileService] Unattached content file created: file_id=%d, url=%s", content_file.id, source_url)
+            return content_file
+        except Exception as e:
+            logger.error("[FileService] Failed to save unattached file to DB: %s", e)
+            await self.db.rollback()
+            try:
+                await self.storage.delete_file(object_name)
+            except Exception:
+                pass
+            raise ValidationError(f"Не удалось сохранить файл в БД: {e}")
+
+    async def attach_file_to_namespace(
+        self,
+        content_file_id: int,
+        user_id: int,
+        namespace_id: int,
+    ):
+        """
+        Привязывает контент-файл (File.id) к пространству пользователя, создавая запись UserFile.
+        Если UserFile для этой пары (user_id, file_id) уже существует — обновляет namespace_id.
+
+        Returns:
+            UserFileEntity созданной или обновлённой записи.
+        """
+        if not self.file_repository or not self.user_file_repository or not self.namespace_repository:
+            raise ValidationError("file_repository, user_file_repository и namespace_repository обязательны")
+
+        content_file = await self.file_repository.get_by_id(content_file_id)
+        if not content_file:
+            raise NotFoundError(f"Файл с ID {content_file_id} не найден")
+
+        namespace = await self.namespace_repository.get_by_id(namespace_id)
+        if not namespace:
+            raise NotFoundError(f"Пространство с ID {namespace_id} не найдено")
+        if namespace.user_id != user_id:
+            raise ForbiddenError("У вас нет доступа к этому пространству")
+
+        existing = await self.user_file_repository.find_by_user_and_file(user_id, content_file_id)
+        if existing:
+            if existing.namespace_id != namespace_id:
+                await self.user_file_repository.update_namespace(existing.id, namespace_id)
+                await self.db.commit()
+                logger.info(
+                    "[FileService] Attach: moved existing user_file=%d to namespace=%d",
+                    existing.id, namespace_id,
+                )
+                return await self.user_file_repository.get_by_id(existing.id)
+            logger.info("[FileService] Attach: user_file=%d already in namespace=%d", existing.id, namespace_id)
+            return existing
+
+        title = (content_file.media_metadata or {}).get("title") or "Document"
+        user_file = await self.user_file_repository.create(
+            user_id=user_id,
+            file_id=content_file_id,
+            namespace_id=namespace_id,
+            custom_title=title,
+        )
+        await self.db.commit()
+        logger.info(
+            "[FileService] Attach: created user_file=%d for file=%d, namespace=%d",
+            user_file.id, content_file_id, namespace_id,
+        )
+        return user_file
 
     async def get_file_text(self, user_file_id: int, user_id: int) -> str:
         """
@@ -779,4 +978,109 @@ class FileService:
             created_at=content_file.created_at if content_file else datetime.utcnow(),
             updated_at=content_file.created_at if content_file else datetime.utcnow(),
             file_path=content_file.file_path if content_file else None,
+        )
+
+    async def replace_file_content(
+        self,
+        file_id: int,
+        user_id: int,
+        file_content: bytes,
+        filename: str,
+        *,
+        summary_repository: Optional[SummaryRepository] = None,
+        task_publisher: Optional[TaskPublisher] = None,
+    ) -> FileInfo:
+        """
+        Заменяет содержимое существующего файла in-place.
+
+        Проверяет владельца, перезаписывает файл в хранилище, обновляет метаданные в БД,
+        инвалидирует суммаризацию, удаляет эмбеддинги и перезапускает конвейер индексации.
+        """
+        if not self.file_repository or not self.user_file_repository:
+            raise ValidationError("file_repository and user_file_repository required")
+
+        user_file = await self.user_file_repository.get_by_id(file_id)
+        if not user_file:
+            raise NotFoundError(f"File with id {file_id} not found")
+        if user_file.user_id != user_id:
+            raise ForbiddenError("You don't have access to this file")
+
+        content_file = await self.file_repository.get_by_id(user_file.file_id)
+        if not content_file:
+            raise NotFoundError("File content record not found")
+        if not content_file.file_path:
+            raise NotFoundError("File path not found in storage")
+
+        file_ext = await self._validate_upload_params(
+            filename, file_content, user_id, user_file.namespace_id
+        )
+        text = self._extract_text_from_file(file_content, file_ext)
+        if not text or not text.strip():
+            raise ValidationError("File content is empty or could not be processed")
+
+        await self.storage.upload_file(
+            file_content=file_content,
+            object_name=content_file.file_path,
+            content_type=self._get_content_type(file_ext),
+            metadata={
+                "user_id": str(user_id),
+                "namespace_id": str(user_file.namespace_id or ""),
+                "original_filename": base64.b64encode(filename.encode("utf-8")).decode("ascii"),
+            },
+        )
+
+        new_hash = self.compute_content_hash(file_content)[:64]
+        existing_meta = content_file.media_metadata or {}
+        updated_meta = {
+            **existing_meta,
+            "title": filename,
+            "file_type": file_ext,
+            "file_size": len(file_content),
+        }
+        await self.file_repository.update_content_metadata(
+            file_id=content_file.id,
+            content_hash=new_hash,
+            media_metadata=updated_meta,
+        )
+
+        if self.db:
+            from sqlalchemy import update
+            await self.db.execute(
+                update(UserFile).where(UserFile.id == user_file.id).values(custom_title=filename)
+            )
+
+        summary_repo = summary_repository or self.summary_repository
+        if summary_repo:
+            await summary_repo.delete_by_file_id(content_file.id)
+            logger.info("[FileService] Invalidated summary for file %d", content_file.id)
+
+        if self.vector_repository:
+            await self.vector_repository.delete_by_file_id(content_file.id)
+            logger.info("[FileService] Deleted embeddings for file %d", content_file.id)
+
+        publisher = task_publisher or self.task_publisher
+        if publisher:
+            publisher.send_embeddings_task(
+                content_file_id=content_file.id,
+                text=text,
+                namespace_id=user_file.namespace_id,
+                filename=filename,
+                user_file_id=user_file.id,
+            )
+            logger.info("[FileService] Sent embeddings task for replaced file %d", file_id)
+
+        await self.db.commit()
+
+        updated_at = datetime.utcnow()
+        return FileInfo(
+            user_file_id=user_file.id,
+            content_file_id=content_file.id,
+            user_id=user_id,
+            namespace_id=user_file.namespace_id,
+            filename=filename,
+            file_type=self._get_content_type(file_ext),
+            file_size=len(file_content),
+            created_at=content_file.created_at,
+            updated_at=updated_at,
+            file_path=content_file.file_path,
         )

@@ -1,12 +1,12 @@
 """Схемы запроса и ответа для графа /ask."""
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import List, Optional, Literal
 
 from app.schemas.summary import SummaryResult
 
 
 # Типы интентов для override
-OverrideIntentType = Literal["summarize", "index_url", "save_file", "rag_query"]
+OverrideIntentType = Literal["summarize", "index_url", "save_file", "rag_query", "send_file"]
 
 
 class AskRequest(BaseModel):
@@ -24,6 +24,7 @@ class SourceItem(BaseModel):
     """Один источник в ответе."""
     filename: str = Field(..., description="Имя файла")
     relevance: float = Field(..., description="Релевантность (0–1)")
+    file_id: Optional[int] = Field(None, description="ID файла для скачивания (только для send_file)")
 
 
 class AskResponse(BaseModel):
@@ -31,4 +32,5 @@ class AskResponse(BaseModel):
     answer: str = Field(..., description="Текстовый ответ на вопрос")
     sources: list[SourceItem] = Field(default_factory=list, description="Источники (файлы и релевантность)")
     agent_steps: list[str] = Field(default_factory=list, description="Цепочка агентов, выполнявших запрос")
-    file_id: Optional[int] = Field(None, description="ID файла (если был создан/найден)")
+    file_ids: List[int] = Field(default_factory=list, description="Список ID файлов (для скачивания или один созданный)")
+    chat_id: Optional[int] = Field(None, description="ID чата (текущий или созданный)")

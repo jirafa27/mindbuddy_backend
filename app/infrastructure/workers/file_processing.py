@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def _ensure_async_db() -> None:
     if db_base.AsyncSessionLocal is None:
-        db_base.setup_async_engine()
+        db_base.setup_async_engine_for_celery()
 
 
 async def _delete_user_file_async(user_file_id: int) -> None:

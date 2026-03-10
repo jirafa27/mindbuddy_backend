@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, UploadFile, File, status, Query, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Query, Form
 from fastapi.responses import StreamingResponse
 import io
 import logging
@@ -12,6 +12,7 @@ from app.schemas.file import (
     FileResponse,
     FileInfo,
 )
+from app.schemas.content import AttachFileRequest, AttachFileResponse
 from app.services.file_service import FileService
 from app.services.summary_service import SummaryService
 from app.services.namespace_service import NamespaceService
@@ -24,16 +25,16 @@ from app.core.dependencies import (
 )
 from app.domain.protocols import TaskPublisher
 from app.schemas.user import UserResponse
-from app.core.exceptions import ValidationError
+from app.core.exceptions import ValidationError, NotFoundError, ForbiddenError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-@router.post("/upload", response_model=ResponseMessage[FileResponse], status_code=status.HTTP_201_CREATED)
+@router.post("/upload", response_model=ResponseMessage[list[FileResponse]], status_code=status.HTTP_201_CREATED)
 async def upload_file(
-    file: Optional[UploadFile] = File(None),
+    files: list[UploadFile] = File(default=[]),
     url: Optional[str] = Form(None, description="URL для парсинга (YouTube, веб-страница)"),
     text: Optional[str] = Form(None, description="Текст для сохранения в пространство (Markdown)"),
     title: Optional[str] = Form(None, description="Заголовок MD-файла (если передан text)"),
@@ -45,14 +46,15 @@ async def upload_file(
     task_publisher: TaskPublisher = Depends(get_task_publisher),
 ):
     """
-    Универсальный эндпоинт загрузки контента (файл, URL или текст).
+    Универсальный эндпоинт загрузки контента (файл/файлы, URL или текст).
     Аутентификация: JWT в заголовке Authorization.
     """
     user_id = user.id
-    has_file = file is not None
+    all_files = files
+    has_files = len(all_files) > 0
     has_url = bool(url and str(url).strip())
     has_text = bool(text is not None and str(text).strip())
-    sources = has_file + has_url + has_text
+    sources = has_files + has_url + has_text
     if sources == 0:
         raise ValidationError("Необходимо передать file, url или text")
     if sources > 1:
@@ -60,7 +62,7 @@ async def upload_file(
 
     if namespace_id is None:
         namespace_id = await namespace_service.get_or_create_inbox(user_id)
-    
+
     if url:
         logger.info("[Upload] Processing URL: %s (user=%d, namespace_id=%s)", url, user_id, namespace_id)
         ingest_result = await summary_service.ingest_url(
@@ -75,13 +77,13 @@ async def upload_file(
             filename=ingest_result.filename,
             user_file_id=ingest_result.file_id,
         ) or ""
-        return ResponseMessage[FileResponse](data=FileResponse(
+        return ResponseMessage[list[FileResponse]](data=[FileResponse(
             file_id=ingest_result.file_id,
             filename=ingest_result.filename,
             task_id=task_id,
             status="duplicate" if ingest_result.is_duplicate else "processing",
             message=ingest_result.message,
-        ))
+        )])
 
     # Обработка текста (сохранение как MD)
     if text is not None:
@@ -98,40 +100,40 @@ async def upload_file(
             filename=file_created.filename,
             user_file_id=file_created.file_id,
         ) or ""
-        return ResponseMessage[FileResponse](data=FileResponse(
+        return ResponseMessage[list[FileResponse]](data=[FileResponse(
             file_id=file_created.file_id,
             filename=file_created.filename,
             task_id=task_id,
             status="processing",
             message="Текст сохранён в пространство как Markdown",
+        )])
+
+    # Обработка файлов
+    results = []
+    for upload in all_files:
+        file_content = await upload.read()
+        filename = decode_filename(upload.filename or "unnamed_file")
+        file_created = await file_service.upload_file(
+            file_content=file_content,
+            filename=filename,
+            namespace_id=namespace_id,
+            user_id=user_id,
+        )
+        task_id = task_publisher.send_embeddings_task(
+            content_file_id=file_created.content_file_id,
+            text=file_created.text,
+            namespace_id=namespace_id,
+            filename=file_created.filename,
+            user_file_id=file_created.file_id,
+        ) or ""
+        results.append(FileResponse(
+            file_id=file_created.file_id,
+            filename=file_created.filename,
+            task_id=task_id,
+            status="processing",
         ))
 
-    # Обработка файла
-    file_content = await file.read()
-    
-    filename = decode_filename(file.filename or "unnamed_file")
-    
-    file_created = await file_service.upload_file(
-        file_content=file_content,
-        filename=filename,
-        namespace_id=namespace_id,
-        user_id=user_id,
-    )
-    
-    task_id = task_publisher.send_embeddings_task(
-        content_file_id=file_created.content_file_id,
-        text=file_created.text,
-        namespace_id=namespace_id,
-        filename=file_created.filename,
-        user_file_id=file_created.file_id,
-    ) or ""
-
-    return ResponseMessage[FileResponse](data=FileResponse(
-        file_id=file_created.file_id,
-        filename=file_created.filename,
-        task_id=task_id,
-        status="processing",
-    ))
+    return ResponseMessage[list[FileResponse]](data=results)
 
 
 
@@ -172,6 +174,33 @@ async def download_file(
             "Content-Disposition": encode_filename_for_header(filename)
         }
     )
+
+
+@router.put("/{file_id}/content", response_model=ResponseMessage[FileInfo])
+async def replace_file_content(
+    file_id: int,
+    file: UploadFile = File(..., description="Новое содержимое файла"),
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+) -> ResponseMessage[FileInfo]:
+    """
+    Заменяет содержимое существующего файла in-place, сохраняя file_id.
+
+    Проверяет владельца, перезаписывает файл в хранилище, обновляет метаданные,
+    инвалидирует суммаризацию и перезапускает конвейер индексации (эмбеддинги).
+    """
+    file_content = await file.read()
+    filename = decode_filename(file.filename or "unnamed_file")
+    if not filename or not file_content:
+        raise ValidationError("Файл не передан или пуст")
+
+    file_info = await file_service.replace_file_content(
+        file_id=file_id,
+        user_id=user.id,
+        file_content=file_content,
+        filename=filename,
+    )
+    return ResponseMessage[FileInfo](status="success", data=file_info)
 
 
 @router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -244,3 +273,51 @@ async def move_file_to_namespace(
                 updated_at=file_info.updated_at,
                 file_path=file_info.file_path,
     ))
+
+
+@router.post(
+    "/{file_id}/attach",
+    response_model=ResponseMessage[AttachFileResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def attach_file_to_namespace(
+    file_id: int,
+    body: AttachFileRequest,
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+) -> ResponseMessage[AttachFileResponse]:
+    """
+    Привязывает контент-файл к пространству пользователя, создавая запись в user_files.
+
+    `file_id` — это ID контент-файла (files.id), возвращённый из `POST /content/extract`.
+    После успешной привязки файл появляется в пространстве пользователя.
+
+    Если файл уже привязан к другому пространству — namespace_id обновляется.
+    """
+    try:
+        user_file = await file_service.attach_file_to_namespace(
+            content_file_id=file_id,
+            user_id=user.id,
+            namespace_id=body.namespace_id,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ForbiddenError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("[API/Attach] Failed to attach file_id=%d for user=%d", file_id, user.id)
+        raise HTTPException(status_code=500, detail="Ошибка привязки файла к пространству")
+
+    content_file = await file_service.file_repository.get_by_id(file_id)
+    filename = user_file.custom_title or (content_file.media_metadata or {}).get("title") if content_file else None
+
+    return ResponseMessage[AttachFileResponse](
+        data=AttachFileResponse(
+            user_file_id=user_file.id,
+            content_file_id=file_id,
+            namespace_id=body.namespace_id,
+            filename=filename,
+        )
+    )

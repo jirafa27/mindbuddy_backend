@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.entities import FileEntity
 from app.infrastructure.db.models import File
@@ -41,6 +41,15 @@ class PgFileRepository:
             return None
         return self._to_entity(row)
 
+    async def get_by_source_url(self, source_url: str) -> Optional[FileEntity]:
+        result = await self.db.execute(
+            select(File).where(File.source_url == source_url).limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return self._to_entity(row)
+
     async def create(
         self,
         content_hash: str,
@@ -61,3 +70,20 @@ class PgFileRepository:
         self.db.add(content_file)
         await self.db.flush()
         return self._to_entity(content_file)
+
+    async def update_content_metadata(
+        self,
+        file_id: int,
+        *,
+        content_hash: str,
+        media_metadata: Optional[dict] = None,
+    ) -> Optional[FileEntity]:
+        """Обновляет content_hash и media_metadata файла."""
+        meta = media_metadata or {}
+        await self.db.execute(
+            update(File)
+            .where(File.id == file_id)
+            .values(content_hash=content_hash, media_metadata=meta)
+        )
+        await self.db.flush()
+        return await self.get_by_id(file_id)

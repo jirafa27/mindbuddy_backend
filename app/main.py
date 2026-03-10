@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,7 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.middleware import (
     app_exception_handler,
+    validation_exception_handler,
     unicode_decode_error_handler,
     httpx_status_error_handler,
     httpx_request_error_handler,
@@ -24,22 +26,11 @@ from app.core.middleware import (
 )
 from app.infrastructure.db.base import init_db, setup_async_engine
 from app.api import api_router
-from app.core.dependencies import get_intent_classifier
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения"""
     setup_async_engine()
     await init_db()
-    
-    # Предзагрузка sentence-transformers модели (singleton)
-    startup_logger = logging.getLogger(__name__)
-    try:
-        get_intent_classifier()  # Инициализация singleton
-        startup_logger.info("IntentClassifier initialized successfully")
-    except Exception as e:
-        startup_logger.warning(f"IntentClassifier failed to load: {e}. Falling back to keyword matching.")
 
     yield
 
@@ -59,6 +50,7 @@ app = FastAPI(
 
 # Обработчики исключений (видят все исключения из эндпоинтов, без BaseHTTPMiddleware)
 app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(UnicodeDecodeError, unicode_decode_error_handler)
 app.add_exception_handler(httpx.HTTPStatusError, httpx_status_error_handler)
 app.add_exception_handler(httpx.RequestError, httpx_request_error_handler)

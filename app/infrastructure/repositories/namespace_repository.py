@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select, delete
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from app.infrastructure.db.models import Namespace, UserFile
 from app.domain.entities import NamespaceEntity, NamespaceFileItem, UserFileEntity
@@ -158,5 +158,11 @@ class PgNamespaceRepository:
         return self._to_entity(model, user_files=[])
 
     async def delete(self, id: int) -> None:
-        await self.db.execute(delete(Namespace).where(Namespace.id == id))
+        """Удаляет namespace и все user_files в нём (cascade)."""
+        result = await self.db.execute(
+            select(Namespace).where(Namespace.id == id).options(selectinload(Namespace.user_files))
+        )
+        namespace = result.scalar_one_or_none()
+        if namespace:
+            await self.db.delete(namespace)
         await self.db.flush()

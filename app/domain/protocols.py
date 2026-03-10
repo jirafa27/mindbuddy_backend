@@ -1,4 +1,4 @@
-from typing import Any, Protocol, Optional, List
+from typing import Any, Dict, Protocol, Optional, List, Tuple
 
 from app.domain.entities import (
     FileEntity,
@@ -9,6 +9,8 @@ from app.domain.entities import (
     SearchResultRow,
     ParsedContent,
     SummaryEntity,
+    ChatEntity,
+    ChatMessageEntity,
 )
 
 
@@ -102,6 +104,9 @@ class FileRepository(Protocol):
     async def get_by_content_hash(self, content_hash: str) -> Optional[FileEntity]:
         ...
 
+    async def get_by_source_url(self, source_url: str) -> Optional[FileEntity]:
+        ...
+
     async def create(
         self,
         content_hash: str,
@@ -114,6 +119,16 @@ class FileRepository(Protocol):
         ...
 
     async def delete(self, file: FileEntity) -> None:
+        ...
+
+    async def update_content_metadata(
+        self,
+        file_id: int,
+        *,
+        content_hash: str,
+        media_metadata: Optional[dict] = None,
+    ) -> Optional[FileEntity]:
+        """Обновляет content_hash и media_metadata файла."""
         ...
 
 
@@ -139,7 +154,7 @@ class UserFileRepository(Protocol):
     async def find_by_content_hash(self, content_hash: str, user_id: int) -> Optional[UserFileEntity]:
         ...
 
-    async def find_by_user_and_file(self, user_id: int, file_id: int) -> Optional[UserFileEntity]:
+    async def find_by_user_and_file(self, user_id: int, file_id: int, namespace_id: Optional[int] = None) -> Optional[UserFileEntity]:
         ...
 
 
@@ -204,13 +219,89 @@ class VectorRepository(Protocol):
     ) -> List[ChunkEntity]:
         ...
 
+    async def delete_by_file_id(self, file_id: int) -> int:
+        """Удаляет все эмбеддинги для файла."""
+        ...
+
     async def search(
         self,
-        query_embedding: List[float],
+        query_embedding: Optional[List[float]],
         user_id: int,
         limit: int = 5,
         namespace_id: Optional[int] = None,
+        file_ids: Optional[List[int]] = None,
+        *,
+        sql: Optional[str] = None,
     ) -> List[SearchResultRow]:
+        ...
+
+
+class ChatRepository(Protocol):
+    """Протокол репозитория чатов."""
+
+    async def create_chat(
+        self, user_id: int, name: Optional[str] = None
+    ) -> ChatEntity:
+        """Создать новый чат."""
+        ...
+
+    async def get_chat_by_id(self, chat_id: int, user_id: int) -> Optional[ChatEntity]:
+        """Получить чат по id с проверкой владельца."""
+        ...
+
+    async def update_chat_name(
+        self, chat_id: int, user_id: int, name: Optional[str]
+    ) -> Optional[ChatEntity]:
+        """Обновить название чата."""
+        ...
+
+    async def add_message(
+        self,
+        chat_id: int,
+        role: str,
+        text: str,
+        file_ids: Optional[List[int]] = None,
+    ) -> ChatMessageEntity:
+        """Добавить сообщение в чат."""
+        ...
+
+    async def get_messages(
+        self,
+        chat_id: int,
+        user_id: int,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[ChatMessageEntity]:
+        """Получить историю сообщений чата с пагинацией."""
+        ...
+
+    async def get_messages_count(self, chat_id: int, user_id: int) -> int:
+        """Общее количество сообщений в чате (для пагинации)."""
+        ...
+
+    async def get_user_chats(
+        self,
+        user_id: int,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Tuple[List[Tuple[ChatEntity, int]], int]:
+        """Список чатов пользователя с количеством сообщений и общее число чатов."""
+        ...
+
+    async def delete_chat(self, chat_id: int, user_id: int) -> bool:
+        """Удалить чат и все его сообщения. Возвращает True если удалён, False если не найден или не принадлежит пользователю."""
+        ...
+
+    async def get_pending_action(self, chat_id: int) -> Optional[Dict[str, Any]]:
+        """Получить отложенное действие чата (pending_action)."""
+        ...
+
+    async def set_pending_action(self, chat_id: int, action: Dict[str, Any]) -> None:
+        """Сохранить отложенное действие в чате."""
+        ...
+
+    async def clear_pending_action(self, chat_id: int) -> None:
+        """Очистить отложенное действие чата."""
         ...
 
 
@@ -234,6 +325,10 @@ class SummaryRepository(Protocol):
         model_name: Optional[str] = "yandexgpt",
         **kwargs: Any,
     ) -> SummaryEntity:
+        ...
+
+    async def delete_by_file_id(self, file_id: int) -> int:
+        """Удаляет все суммаризации для файла."""
         ...
 
 

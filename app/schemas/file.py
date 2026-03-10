@@ -81,6 +81,8 @@ class FileCreated(BaseModel):
     content_file_id: int  # File.id (для эмбеддингов и суммаризации)
     filename: str
     text: str  # Текст для передачи в Celery задачу
+    is_new_file: bool = True  # False если File уже существовал (дедупликация по содержимому)
+    is_new_user_file: bool = True  # False если UserFile для этого user+namespace уже существовал
 
 
 class IngestUrlResult(BaseModel):

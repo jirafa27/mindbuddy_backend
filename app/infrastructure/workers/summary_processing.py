@@ -6,24 +6,22 @@ from celery import Task
 from celery.exceptions import MaxRetriesExceededError
 
 from app.infrastructure.workers.celery_app import celery_app
-from app.core.dependencies import create_summary_service_for_celery, get_text_chunker_service, get_yandex_iam_service
+from app.core.dependencies import create_summary_service_for_celery, get_text_chunker_service, get_llm_provider
 from app.graph.nodes.summary_agent import SummaryAgent
 from app.infrastructure.db import base as db_base
-from app.infrastructure.llm.yandex_completion import YandexCompletionService
 
 logger = logging.getLogger(__name__)
 
 
 def _ensure_async_db() -> None:
     if db_base.AsyncSessionLocal is None:
-        db_base.setup_async_engine()
+        db_base.setup_async_engine_for_celery()
 
 
 def _get_summary_agent_for_celery() -> SummaryAgent:
     """SummaryAgent для Celery (без FastAPI Depends)."""
-    llm_service = YandexCompletionService(iam_service=get_yandex_iam_service())
     return SummaryAgent(
-        llm_service=llm_service,
+        llm_service=get_llm_provider(),
         text_chunker=get_text_chunker_service(),
     )
 
@@ -33,13 +31,12 @@ async def _run_summarize_url(url: str, user_id: int) -> dict:
     async with db_base.AsyncSessionLocal() as db:
         summary_service = create_summary_service_for_celery(db)
         summary_agent = _get_summary_agent_for_celery()
-        file_service = summary_service.file_service
-        content_extractor = summary_service.content_extractor
-        parsed = await content_extractor.extract(url)
-        content = await file_service.get_or_create_content_from_extracted_url(parsed, url, user_id)
-        cached = await summary_service.get_cached_summary(content.user_file_id)
-        if cached:
-            return cached.model_dump()
+        from app.schemas.summary import SummaryResponse
+        content_or_cached = await summary_service.get_content_for_summarization_url(url=url, user_id=user_id)
+        if isinstance(content_or_cached, SummaryResponse):
+            await db.commit()
+            return content_or_cached.model_dump()
+        content = content_or_cached
         summary_result = await summary_agent.summarize(content.text, title=content.title)
         await summary_service.save_summary(content.content_file_id, summary_result)
         await db.commit()
@@ -67,7 +64,7 @@ def process_summary_url(
     
     try:
         result = asyncio.run(_run_summarize_url(url, user_id))
-        logger.info("[Summary Task] Completed for URL: %s, file_id=%d", url, result.get("file_id"))
+        logger.info("[Summary Task] Completed for URL: %s, user_file_id=%d", url, result.get("user_file_id"))
         return result
     
     except Exception as e:

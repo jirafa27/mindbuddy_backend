@@ -1,5 +1,5 @@
 from typing import Any, Optional
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.db.models import Summary
@@ -69,3 +69,8 @@ class PgSummaryRepository:
         self.db.add(summary)
         await self.db.flush()
         return self._to_entity(summary)
+
+    async def delete_by_file_id(self, file_id: int) -> int:
+        """Удаляет все суммаризации для файла. Возвращает количество удалённых записей."""
+        result = await self.db.execute(delete(Summary).where(Summary.file_id == file_id))
+        return result.rowcount or 0

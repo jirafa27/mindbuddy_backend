@@ -1,6 +1,7 @@
 import logging
 from typing import List, Mapping, Optional, Any
-from sqlalchemy import text
+from sqlalchemy import text, delete
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.entities import ChunkEntity, SearchResultRow
@@ -18,11 +19,16 @@ class PgVectorRepository:
         self.db = db
 
     def _row_to_result(self, row: Mapping[str, Any]) -> SearchResultRow:
-        return SearchResultRow(
-            chunk_text=row["chunk_text"],
-            filename=row["filename"],
-            relevance=float(row["relevance"]),
-        )
+        result: SearchResultRow = {"filename": row.get("filename", "Document")}
+        if row.get("chunk_text") is not None:
+            result["chunk_text"] = row["chunk_text"]
+        if row.get("relevance") is not None:
+            result["relevance"] = float(row["relevance"])
+        if row.get("namespace_name") is not None:
+            result["namespace_name"] = row["namespace_name"]
+        if row.get("created_at") is not None:
+            result["created_at"] = str(row["created_at"])
+        return result
 
     async def create_batch(
         self,
@@ -31,30 +37,52 @@ class PgVectorRepository:
         embeddings: List[List[float]],
         namespace_id: Optional[int] = None,
     ) -> List[ChunkEntity]:
-        models = [
-            VectorEmbedding(
-                file_id=file_id,
-                chunk_index=idx,
-                chunk_text=chunk_text,
-                embedding=embedding,
-            )
+        rows = [
+            {
+                "file_id": file_id,
+                "chunk_index": idx,
+                "chunk_text": chunk_text,
+                "embedding": embedding,
+            }
             for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings))
         ]
-        self.db.add_all(models)
-        await self.db.flush()
+        stmt = (
+            pg_insert(VectorEmbedding)
+            .values(rows)
+            .on_conflict_do_update(
+                constraint="uq_vector_embeddings_file_chunk",
+                set_={
+                    "chunk_text": pg_insert(VectorEmbedding).excluded.chunk_text,
+                    "embedding": pg_insert(VectorEmbedding).excluded.embedding,
+                },
+            )
+            .returning(
+                VectorEmbedding.id,
+                VectorEmbedding.file_id,
+                VectorEmbedding.chunk_index,
+                VectorEmbedding.chunk_text,
+                VectorEmbedding.created_at,
+            )
+        )
+        result = await self.db.execute(stmt)
         ns = namespace_id if namespace_id is not None else 0
         return [
             ChunkEntity(
-                id=m.id,
-                file_id=m.file_id,
+                id=row.id,
+                file_id=row.file_id,
                 namespace_id=ns,
-                chunk_index=m.chunk_index,
-                chunk_text=m.chunk_text,
-                embedding=list(m.embedding),
-                created_at=m.created_at,
+                chunk_index=row.chunk_index,
+                chunk_text=row.chunk_text,
+                embedding=rows[row.chunk_index]["embedding"],
+                created_at=row.created_at,
             )
-            for m in models
+            for row in result.fetchall()
         ]
+
+    async def delete_by_file_id(self, file_id: int) -> int:
+        """Удаляет все эмбеддинги для файла. Возвращает количество удалённых записей."""
+        result = await self.db.execute(delete(VectorEmbedding).where(VectorEmbedding.file_id == file_id))
+        return result.rowcount or 0
 
     async def search(
         self,
@@ -62,19 +90,18 @@ class PgVectorRepository:
         user_id: int = 0,
         limit: int = 5,
         namespace_id: Optional[int] = None,
+        file_ids: Optional[List[int]] = None,
         *,
         sql: Optional[str] = None,
     ) -> List[SearchResultRow]:
-        """
-        Семантический поиск (sql=None, используется VECTOR_SEARCH_SQL) или выполнение переданного SQL (агент).
-        """
-        actual_sql = sql if sql is not None else VECTOR_SEARCH_SQL
+        """Семантический поиск или выполнение переданного SQL."""
         return await self._execute_search_sql(
-            actual_sql,
+            sql or VECTOR_SEARCH_SQL,
             query_embedding=query_embedding,
             user_id=user_id,
             limit=limit,
             namespace_id=namespace_id,
+            file_ids=file_ids,
         )
 
     async def _execute_search_sql(
@@ -84,8 +111,13 @@ class PgVectorRepository:
         user_id: int,
         limit: int = 5,
         namespace_id: Optional[int] = None,
+        file_ids: Optional[List[int]] = None,
     ) -> List[SearchResultRow]:
         sql = sql.replace(":query_embedding::vector", "CAST(:query_embedding AS vector)")
+        sql = sql.replace(":namespace_id::integer", "CAST(:namespace_id AS integer)")
+        # Подставляем список file_ids напрямую (безопасно — только целые числа)
+        if file_ids and "__FILE_IDS__" in sql:
+            sql = sql.replace("__FILE_IDS__", ",".join(str(fid) for fid in file_ids))
         is_semantic = ":query_embedding" in sql
         if is_semantic:
             if not query_embedding:
@@ -102,7 +134,11 @@ class PgVectorRepository:
             params["query_embedding"] = "[" + ",".join(str(x) for x in query_embedding) + "]"
         if ":namespace_id" in sql:
             params["namespace_id"] = namespace_id
-        stmt = text(sql).bindparams(**params)
-        result = await self.db.execute(stmt)
-        rows = result.mappings().all()
-        return [self._row_to_result(row) for row in rows]
+        try:
+            stmt = text(sql).bindparams(**params)
+            result = await self.db.execute(stmt)
+            rows = result.mappings().all()
+            return [self._row_to_result(row) for row in rows]
+        except Exception:
+            await self.db.rollback()
+            raise

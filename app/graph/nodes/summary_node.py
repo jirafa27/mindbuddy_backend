@@ -52,7 +52,7 @@ class SummaryNode:
             return await self._summarize_file(state, file_service, summary_service, summary_agent, user_id)
         elif detected_url:
             return await self._summarize_url(
-                state, file_service, content_extractor, summary_service, summary_agent, user_id
+                state, summary_service, summary_agent, user_id
             )
         elif history_file_id:
             return await self._summarize_existing_file(state, file_service, summary_service, summary_agent, user_id)
@@ -78,8 +78,6 @@ class SummaryNode:
     async def _summarize_url(
         self,
         state: AskState,
-        file_service: FileService,
-        content_extractor,
         summary_service: SummaryService,
         summary_agent,
         user_id: int,
@@ -92,11 +90,10 @@ class SummaryNode:
                 "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no URL"],
             }
         try:
-            parsed = await content_extractor.extract(detected_url)
-            content = await file_service.get_or_create_content_from_extracted_url(parsed, detected_url, user_id)
-            cached = await summary_service.get_cached_summary(content.user_file_id)
-            if cached:
-                return self._state_from_response(state, cached, f"Summarized URL: {detected_url}")
+            content_or_cached = await summary_service.get_content_for_summarization_url(url=detected_url, user_id=user_id)
+            if isinstance(content_or_cached, SummaryResponse):
+                return self._state_from_response(state, content_or_cached, f"Summarized URL: {detected_url}")
+            content = content_or_cached
             summary_result = await summary_agent.summarize(content.text, title=content.title)
             await summary_service.save_summary(content.content_file_id, summary_result)
             result = SummaryService.build_summary_response(content, summary_result)
@@ -124,12 +121,12 @@ class SummaryNode:
                 "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no file"],
             }
         try:
-            content = await file_service.get_content_from_uploaded_file(
+            content_or_cached = await summary_service.get_content_for_summarization_file(
                 file_content=file_content, filename=filename, user_id=user_id
             )
-            cached = await summary_service.get_cached_summary(content.user_file_id)
-            if cached:
-                return self._state_from_response(state, cached, f"Summarized file: {filename}")
+            if isinstance(content_or_cached, SummaryResponse):
+                return self._state_from_response(state, content_or_cached, f"Summarized file: {filename}")
+            content = content_or_cached
             summary_result = await summary_agent.summarize(content.text, title=content.title)
             await summary_service.save_summary(content.content_file_id, summary_result)
             result = SummaryService.build_summary_response(content, summary_result)
@@ -156,32 +153,19 @@ class SummaryNode:
                 "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no history_file_id"],
             }
         try:
-            file = await file_service.get_file_info(history_file_id, user_id)
-            if not file:
-                return {
-                    **state,
-                    "answer": "Не удалось найти файл в истории.",
-                    "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no file"],
-                }
-            text = await file_service.get_file_text(file.user_file_id, user_id)
-            if not text:
-                return {
-                    **state,
-                    "answer": "Не удалось получить текст файла.",
-                    "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no text"],
-                }
-            summary_result = await summary_agent.summarize(text, title=file.filename)
-            await summary_service.save_summary(file.content_file_id, summary_result)
-            result = SummaryResponse(
-                user_file_id=file.user_file_id,
-                content_file_id=file.content_file_id,
-                summary=summary_result.content,
-                title=file.filename,
-                source_url=None,
-                is_cached=False,
-                method=summary_result.method,
+            content_or_cached = await summary_service.get_content_for_summarization_existing_file(
+                file_id=history_file_id,
+                user_id=user_id,
             )
-            return self._state_from_response(state, result, f"Summarized existing file: {file.filename}")
+            if isinstance(content_or_cached, SummaryResponse):
+                return self._state_from_response(
+                    state, content_or_cached, f"Summarized existing file (cached): file_id={history_file_id}"
+                )
+            content = content_or_cached
+            summary_result = await summary_agent.summarize(content.text, title=content.title)
+            await summary_service.save_summary(content.content_file_id, summary_result)
+            result = SummaryService.build_summary_response(content, summary_result)
+            return self._state_from_response(state, result, f"Summarized existing file: {content.title}")
         except ValueError as e:
             return {**state, "answer": f"Ошибка: {e}", "agent_steps": state.get("agent_steps", []) + [f"[SummaryNode] Error: {e}"]}
         except Exception as e:

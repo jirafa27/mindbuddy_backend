@@ -6,6 +6,10 @@ from langchain_core.runnables import RunnableConfig
 
 from app.graph.state import AskState
 from app.services.search_service import SearchService
+from app.infrastructure.repositories.vector_queries import (
+    VECTOR_SEARCH_SQL,
+    VECTOR_SEARCH_BY_FILES_SQL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +27,14 @@ class ExecuteSearchNode:
         user_id = state.get("user_id")
         namespace_id = state.get("namespace_id")
         query_embedding = state.get("query_embedding")
+        search_file_ids = state.get("search_file_ids")
         limit = 5
 
-        if not sql_query or user_id is None:
+        if user_id is None:
             return {"agent_steps": agent_steps}
+
+        if not sql_query:
+            sql_query = VECTOR_SEARCH_BY_FILES_SQL if search_file_ids else VECTOR_SEARCH_SQL
 
         if search_service is None:
             return {
@@ -42,6 +50,7 @@ class ExecuteSearchNode:
                 user_id=user_id,
                 limit=limit,
                 namespace_id=namespace_id,
+                file_ids=search_file_ids,
             )
             return {
                 "search_result": rows,

@@ -11,60 +11,32 @@ from app.infrastructure.llm.yandex_completion import LLMCompletionError
 logger = logging.getLogger(__name__)
 
 SCHEMA_HINT = """
-Таблицы:
-- vector_embeddings: id, file_id, namespace_id (может быть NULL), chunk_index, chunk_text, embedding (тип vector(256))
-- files: id, namespace_id, user_id, filename, file_path, file_type, file_size, created_at, updated_at
+Таблицы (реальная схема БД):
+- vector_embeddings: id, file_id, chunk_index, chunk_text, embedding (vector(256)) — НЕТ колонки namespace_id
+- files: id, content_hash, source_url, file_path, media_metadata (JSON), created_at — НЕТ filename, НЕТ user_id
+- user_files: id, user_id, file_id, namespace_id, custom_title, created_at — связь пользователь–файл, user_id здесь
 - namespaces: id, user_id, name, description, created_at
 
-ОПРЕДЕЛИ ТИП ЗАПРОСА:
+Имя файла для вывода: COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename.
+Фильтр по пользователю: только через user_files — uf.user_id = :user_id (в таблице files НЕТ user_id).
 
-ТИП 1 — СТРУКТУРНЫЙ ЗАПРОС (о файлах, папках, пространствах):
-Ключевые слова: "что лежит", "какие файлы", "покажи файлы", "список файлов", "что в папке", "что в пространстве", "мои папки", "сколько файлов", "перечисли"
-Примеры вопросов:
-- "Что у меня лежит в пространстве X?" → СТРУКТУРНЫЙ
-- "Какие файлы в папке Y?" → СТРУКТУРНЫЙ
-- "Покажи мои пространства" → СТРУКТУРНЫЙ
-- "Сколько у меня файлов?" → СТРУКТУРНЫЙ
+ТИП 1 — СТРУКТУРНЫЙ: используй user_files uf JOIN files f ON f.id = uf.file_id JOIN namespaces n ON n.id = uf.namespace_id, WHERE uf.user_id = :user_id. Не используй vector_embeddings.
 
-Для СТРУКТУРНЫХ запросов:
-- Используй ТОЛЬКО таблицы files и namespaces
-- НЕ используй vector_embeddings
-- НЕ используй :query_embedding и embedding
-- Фильтруй по имени пространства: n.name ILIKE '%ИмяПространства%'
+ТИП 2 — СЕМАНТИЧЕСКИЙ: ОБЯЗАТЕЛЬНО JOIN vector_embeddings ve JOIN files f ON f.id = ve.file_id JOIN user_files uf ON uf.file_id = ve.file_id.
+Фильтр: WHERE uf.user_id = :user_id. Имя файла: COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename.
+Если указан namespace_id: AND (:namespace_id::integer IS NULL OR uf.namespace_id = :namespace_id). НЕ используй ve.namespace_id — такой колонки нет.
+Если нужно ограничить поиск одним файлом: AND ve.file_id = :file_id.
 
-Пример SQL для "Что лежит в пространстве Пурум?":
-SELECT f.filename, f.file_size, f.created_at, n.name as namespace_name
-FROM files f
-JOIN namespaces n ON f.namespace_id = n.id
-WHERE n.user_id = :user_id AND n.name ILIKE '%Пурум%'
-LIMIT :limit
-
-ТИП 2 — СЕМАНТИЧЕСКИЙ ПОИСК (о содержимом документов):
-Ключевые слова: "о чём", "что написано", "найди информацию", "расскажи про", "объясни", вопросы о смысле/содержании
-Примеры вопросов:
-- "О чём фильм Жизнь Чака?" → СЕМАНТИЧЕСКИЙ
-- "Что написано про архитектуру?" → СЕМАНТИЧЕСКИЙ
-- "Найди информацию о проекте" → СЕМАНТИЧЕСКИЙ
-
-Для СЕМАНТИЧЕСКИХ запросов:
-- Используй vector_embeddings с оператором <=>
-- Включи ve.chunk_text в SELECT
-- ORDER BY ve.embedding <=> CAST(:query_embedding AS vector) ASC
-- ВАЖНО: используй CAST(:query_embedding AS vector), НЕ ::vector
-
-Пример SQL для семантического поиска:
-SELECT ve.chunk_text, f.filename, 1 - (ve.embedding <=> CAST(:query_embedding AS vector)) AS relevance
+Пример SQL для семантического поиска (строго по этой схеме):
+SELECT ve.chunk_text, COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename, 1 - (ve.embedding <=> CAST(:query_embedding AS vector)) AS relevance
 FROM vector_embeddings ve
 JOIN files f ON f.id = ve.file_id
-WHERE f.user_id = :user_id
+JOIN user_files uf ON uf.file_id = ve.file_id
+WHERE uf.user_id = :user_id
 ORDER BY ve.embedding <=> CAST(:query_embedding AS vector) ASC
 LIMIT :limit
 
-ОБЩИЕ ПРАВИЛА:
-- ВСЕГДА добавляй WHERE ... user_id = :user_id
-- ВСЕГДА добавляй LIMIT :limit
-- Если указан namespace_id — добавь фильтр namespace_id = :namespace_id
-- Верни ТОЛЬКО SQL-запрос, без пояснений и markdown
+Правила: user_id только через uf.user_id; filename только через COALESCE(...); LIMIT :limit; не используй f.filename, f.user_id, ve.namespace_id. Верни только SQL.
 """
 
 
@@ -98,15 +70,26 @@ class SQLAgent:
             return {"agent_steps": agent_steps + ["SQLAgent"]}
 
         user_id = state.get("user_id")
+        search_file_ids = state.get("search_file_ids") or []
+
         if namespace_id is not None:
             ns_hint = f"namespace_id = {namespace_id} (поиск внутри конкретного пространства)."
         else:
             ns_hint = "namespace_id = NULL (поиск по ВСЕМ файлам пользователя)."
+
+        file_hint = ""
+        if search_file_ids:
+            file_hint = (
+                f"\nПоиск только по файлам с user_files.id IN ({','.join(map(str, search_file_ids))}). "
+                "Используй шаблон с IN (__FILE_IDS__) для фильтра по файлам."
+            )
+
         user_text = (
             f"Сгенерируй один SQL-запрос для поиска по базе знаний.\n"
             f"Вопрос пользователя: {question}\n"
             f"user_id = {user_id}\n"
-            f"{ns_hint}\n"
+            f"{ns_hint}"
+            f"{file_hint}\n"
             f"{SCHEMA_HINT}"
         )
         if db_error:

@@ -16,11 +16,13 @@ class SearchService:
         user_id: int,
         limit: int = 5,
         namespace_id: Optional[int] = None,
+        file_ids: Optional[List[int]] = None,
     ) -> List[SearchResultRow]:
         return await self._repo.search(
             query_embedding=query_embedding,
             user_id=user_id,
             limit=limit,
             namespace_id=namespace_id,
+            file_ids=file_ids,
             sql=sql,
         )

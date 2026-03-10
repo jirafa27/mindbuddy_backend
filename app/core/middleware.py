@@ -2,6 +2,7 @@ import httpx
 import logging
 
 from fastapi import Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.exceptions import (
@@ -37,6 +38,45 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
     log_level = logger.warning if 400 <= status_code < 500 else logger.error
     log_level("%s: %s", exception_type.__name__, exc.message)
     return JSONResponse(status_code=status_code, content={"detail": exc.message})
+
+
+def _sanitize_validation_errors(errors: list) -> list:
+    """Приводит список ошибок валидации к JSON-сериализуемому виду (без объектов в ctx и т.п.)."""
+    out = []
+    for e in errors:
+        if not isinstance(e, dict):
+            out.append({"msg": str(e)})
+            continue
+        clean = {}
+        for k, v in e.items():
+            if v is None or isinstance(v, (str, int, float, bool)):
+                clean[k] = v
+            elif isinstance(v, (list, tuple)):
+                clean[k] = list(v)
+            elif isinstance(v, dict):
+                clean[k] = {str(a): str(b) for a, b in v.items()}
+            else:
+                clean[k] = str(v)
+        out.append(clean)
+    return out
+
+
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Логирует детали ошибки валидации (422) и возвращает ответ клиенту."""
+    errors = exc.errors()
+    logger.warning(
+        "Validation error (422) %s %s: %s",
+        request.method,
+        request.url.path,
+        errors,
+    )
+    detail = _sanitize_validation_errors(errors)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": detail},
+    )
 
 
 async def unicode_decode_error_handler(request: Request, exc: UnicodeDecodeError) -> JSONResponse:

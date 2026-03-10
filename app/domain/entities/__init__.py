@@ -6,6 +6,7 @@ from app.domain.entities.vector_embedding import VectorEmbeddingEntity
 from app.domain.entities.search_result import SearchResultRow
 from app.domain.entities.parsed_content import ParsedContent, ContentType
 from app.domain.entities.summary import SummaryEntity
+from app.domain.entities.chat import ChatEntity, ChatMessageEntity
 
 __all__ = [
     "UserEntity",
@@ -19,4 +20,6 @@ __all__ = [
     "ContentType",
     "UserFileEntity",
     "SummaryEntity",
+    "ChatEntity",
+    "ChatMessageEntity",
 ]

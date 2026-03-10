@@ -28,12 +28,13 @@ class PgUserFileRepository:
         return self._to_entity(row)
 
     async def find_by_user_and_file(
-        self, user_id: int, file_id: int
+        self, user_id: int, file_id: int, namespace_id: Optional[int] = None
     ) -> Optional[UserFileEntity]:
         result = await self.db.execute(
             select(UserFile).where(
                 UserFile.user_id == user_id,
                 UserFile.file_id == file_id,
+                UserFile.namespace_id == namespace_id,
             )
         )
         row = result.scalar_one_or_none()

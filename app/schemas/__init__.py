@@ -33,6 +33,8 @@ from app.schemas.summary import (
     SummaryInfo,
     SummaryCreateResult,
 )
+from app.schemas.chat import ChatListItem, ChatMessageItem, ChatUpdate
+from app.schemas.content import ContentExtractResponse, AttachFileRequest, AttachFileResponse
 
 __all__ = [
     "FileUploadRequest",
@@ -60,5 +62,11 @@ __all__ = [
     "SummaryResponse",
     "SummaryInfo",
     "SummaryCreateResult",
+    "ChatListItem",
+    "ChatMessageItem",
+    "ChatUpdate",
+    "ContentExtractResponse",
+    "AttachFileRequest",
+    "AttachFileResponse",
 ]
 

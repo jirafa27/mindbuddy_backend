@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from typing import Any
 
@@ -32,6 +33,10 @@ class FileAgent:
         """
         Парсит файл, разбивает на чанки, генерирует эмбеддинги.
         Не сохраняет в БД — это делает SaveFileNode.
+
+        До любых тяжёлых операций проверяет, не является ли файл полным дубликатом
+        (тот же контент уже загружен этим пользователем в этот namespace). Если дубликат —
+        возвращает готовый ответ без единого вызова embedding-модели.
         """
         file_content = state.get("file_content")
         filename = state.get("filename")
@@ -45,6 +50,45 @@ class FileAgent:
             file_ext = filename.split(".")[-1].lower()
         else:
             file_ext = "txt"
+
+        # --- Ранняя проверка дубликата (до парсинга и эмбеддингов) ---
+        configurable = config.get("configurable") or {}
+        file_repository = configurable.get("file_repository")
+        user_file_repository = configurable.get("user_file_repository")
+        user_id = state.get("user_id")
+        namespace_id = state.get("namespace_id")
+        search_query = state.get("search_query")
+        namespace_name_hint = state.get("namespace_name_hint")
+
+        if file_repository is not None and user_file_repository is not None and user_id is not None:
+            content_hash = hashlib.sha256(file_content).hexdigest()
+            existing_content = await file_repository.get_by_content_hash(content_hash)
+            if existing_content is not None:
+                existing_user_file = await user_file_repository.find_by_user_and_file(
+                    user_id, existing_content.id, namespace_id
+                )
+                if existing_user_file is not None:
+                    logger.info(
+                        "FileAgent: full duplicate detected early (user_file_id=%d, content_file_id=%d), skipping embeddings",
+                        existing_user_file.id,
+                        existing_content.id,
+                    )
+                    already_msg = (
+                        f"Файл «{filename}» уже есть в пространстве «{namespace_name_hint or namespace_id}»."
+                        if namespace_id
+                        else f"Файл «{filename}» уже есть в базе знаний."
+                    )
+                    result: dict = {
+                        "file_id": existing_user_file.id,
+                        "search_file_ids": [existing_user_file.id],
+                        "agent_steps": agent_steps + ["FileAgent"],
+                    }
+                    if search_query:
+                        result["file_save_notice"] = already_msg
+                    else:
+                        result["answer"] = already_msg
+                    return result
+        # --- Конец ранней проверки ---
 
         try:
             reader = self.file_reader_factory.get_reader(file_ext)

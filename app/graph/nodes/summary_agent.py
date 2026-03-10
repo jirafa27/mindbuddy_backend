@@ -21,22 +21,28 @@ class SummaryAgent:
     """
     
     SYSTEM_PROMPT_SUMMARY = (
-        "Ты — эксперт по суммаризации текста. "
-        "Создай краткое и информативное резюме представленного текста. "
-        "Сохрани ключевые факты, идеи и выводы. "
+        "Ты — инструмент суммаризации документов. "
+        "Твоя единственная задача: пересказать содержимое текста, который тебе передан. "
+        "СТРОГИЕ ПРАВИЛА: "
+        "1. Используй ИСКЛЮЧИТЕЛЬНО информацию из текста между тегами <text> и </text>. "
+        "2. ЗАПРЕЩЕНО добавлять любые факты, примеры, имена, термины из своих знаний. "
+        "3. Если факт не написан в тексте явно — не упоминай его. "
+        "4. Не интерпретируй тему документа на основе своих знаний — только пересказывай написанное. "
         "Отвечай на русском языке."
     )
-    
+
     SYSTEM_PROMPT_CHUNK = (
-        "Ты — эксперт по суммаризации. "
-        "Создай краткое резюме этого фрагмента текста, сохранив ключевые факты. "
-        "Отвечай кратко, на русском языке."
+        "Ты — инструмент суммаризации фрагментов текста. "
+        "Перескажи содержимое фрагмента между тегами <text> и </text>. "
+        "СТРОГО: используй только то, что написано в тексте. Ничего от себя. "
+        "Отвечай на русском языке."
     )
-    
+
     SYSTEM_PROMPT_FINAL = (
-        "Ты — эксперт по суммаризации. "
-        "На основе представленных резюме фрагментов создай единое связное резюме всего документа. "
-        "Убери повторы, сохрани ключевые факты и идеи. "
+        "Ты — инструмент суммаризации. "
+        "Объедини резюме фрагментов в единое связное резюме документа. "
+        "СТРОГО: используй только то, что есть в резюме фрагментов. Ничего от себя. "
+        "Убери повторы, сохрани все важные факты. "
         "Отвечай на русском языке."
     )
     
@@ -95,20 +101,26 @@ class SummaryAgent:
     async def _stuffing(self, text: str, title: Optional[str] = None) -> SummaryResult:
         """Суммаризация коротких текстов одним запросом к Pro модели."""
         logger.info("[Summary] Starting Stuffing method (text length: %d)", len(text))
-        
-        user_text = text
-        if title:
-            user_text = f"Документ: {title}\n\n{text}"
-        
+        logger.info("[Summary] Text preview (first 500 chars): %s", repr(text[:500]))
+
+        title_line = f"Название документа: {title}\n\n" if title else ""
+        user_message = (
+            f"{title_line}"
+            f"<text>\n{text}\n</text>\n\n"
+            "Составь подробное резюме документа выше. "
+            "Пиши ТОЛЬКО то, что явно написано в тексте внутри тегов <text>. "
+            "Не добавляй ничего из своих знаний."
+        )
+
         messages = [
             {"role": "system", "text": self.SYSTEM_PROMPT_SUMMARY},
-            {"role": "user", "text": f"Создай резюме следующего текста:\n\n{user_text}"},
+            {"role": "user", "text": user_message},
         ]
-        
+
         summary = await self.llm_service.complete(
             messages,
-            temperature=0.3,
-            max_tokens=2048,
+            temperature=0.1,
+            max_tokens=4096,
         )
         
         logger.info("[Summary] Stuffing completed, summary length: %d", len(summary))
@@ -143,45 +155,53 @@ class SummaryAgent:
         
         # Map: параллельная суммаризация чанков через asyncio.gather
         async def summarize_chunk(chunk: str, index: int) -> str:
-            """Суммаризирует один чанк."""
             messages = [
                 {"role": "system", "text": self.SYSTEM_PROMPT_CHUNK},
-                {"role": "user", "text": f"Резюмируй этот фрагмент:\n\n{chunk}"},
+                {
+                    "role": "user",
+                    "text": (
+                        f"<text>\n{chunk}\n</text>\n\n"
+                        "Перескажи содержимое фрагмента выше. "
+                        "Только то, что в нём написано — ничего от себя."
+                    ),
+                },
             ]
             result = await self.llm_service.complete(
                 messages,
-                temperature=0.2,
-                max_tokens=512,
+                temperature=0.1,
+                max_tokens=1024,
             )
             logger.info("[Summary] Chunk %d/%d processed", index + 1, len(chunks))
             return result.strip()
-        
-        # Запускаем все чанки параллельно
+
         chunk_tasks = [
             summarize_chunk(chunk, i) for i, chunk in enumerate(chunks)
         ]
         chunk_summaries = await asyncio.gather(*chunk_tasks)
-        
+
         logger.info("[Summary] All %d chunks processed, starting Reduce", len(chunks))
-        
-        # Reduce: объединяем резюме чанков
+
         combined_summaries = "\n\n---\n\n".join(
             f"Фрагмент {i+1}:\n{s}" for i, s in enumerate(chunk_summaries)
         )
-        
-        reduce_text = combined_summaries
-        if title:
-            reduce_text = f"Документ: {title}\n\n{combined_summaries}"
-        
+
+        title_line = f"Название документа: {title}\n\n" if title else ""
+        reduce_message = (
+            f"{title_line}"
+            f"<fragments>\n{combined_summaries}\n</fragments>\n\n"
+            "Объедини резюме фрагментов в единое резюме документа. "
+            "Используй ТОЛЬКО то, что написано в фрагментах выше."
+        )
+
         messages = [
             {"role": "system", "text": self.SYSTEM_PROMPT_FINAL},
-            {"role": "user", "text": f"На основе резюме фрагментов создай единое резюме документа:\n\n{reduce_text}"},
+            {"role": "user", "text": reduce_message},
         ]
-        
+
         final_summary = await self.llm_service.complete(
             messages,
-            temperature=0.3,
-            max_tokens=2048,
+            temperature=0.1,
+            max_tokens=4096,
         )
         
         logger.info("[Summary] Map-Reduce completed, final summary length: %d", len(final_summary))

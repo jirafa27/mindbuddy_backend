@@ -24,7 +24,7 @@ class ContentToSummarize:
     title: str
     source_url: Optional[str]
     content_file_id: int  # для save_summary
-    user_file_id: int    # для ответа (file_id в SummaryResponse)
+    user_file_id: Optional[int]
 
 
 class SummaryRequest(BaseModel):
@@ -34,7 +34,7 @@ class SummaryRequest(BaseModel):
 
 class SummaryResponse(BaseModel):
     """Ответ с результатом суммаризации."""
-    user_file_id: int
+    user_file_id: Optional[int]
     content_file_id: int
     summary: str
     title: str

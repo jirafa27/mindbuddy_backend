@@ -44,6 +44,7 @@ class IndexUrlNode:
         """
         detected_url = state.get("detected_url")
         user_id = state.get("user_id")
+        namespace_id = state.get("namespace_id")
         
         configurable = (config or {}).get("configurable") or {}
         db: AsyncSession | None = configurable.get("async_db")
@@ -66,18 +67,9 @@ class IndexUrlNode:
             logger.info("[IndexUrl] Extracting content from: %s", detected_url)
             parsed = await self.content_extractor.extract(detected_url)
 
-            file_repository = configurable.get("file_repository")
-            if not file_repository:
-                return {
-                    **state,
-                    "answer": "Ошибка: file_repository не передан в config",
-                    "agent_steps": state.get("agent_steps", []) + ["[IndexUrl] Error: no file_repository"],
-                }
-
             dedup_result = await self.file_service.check_deduplication(
                 user_id=user_id,
                 source_url=detected_url,
-                file_repository=file_repository,
             )
             
             if dedup_result.is_duplicate and dedup_result.existing_file_id:
@@ -100,13 +92,14 @@ class IndexUrlNode:
                 source_url=detected_url,
                 content_hash=parsed.content_hash,
                 content_type=parsed.content_type,
+                namespace_id=namespace_id,
             )
             logger.info("[IndexUrl] Saved file: user_file_id=%d, title=%s", user_file.id, parsed.title)
 
             self.task_publisher.send_embeddings_task(
                 content_file_id=user_file.file_id,
                 text=parsed.text,
-                namespace_id=None,
+                namespace_id=namespace_id,
                 filename=parsed.title,
                 user_file_id=user_file.id,
             )
