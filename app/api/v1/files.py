@@ -137,6 +137,33 @@ async def upload_file(
 
 
 
+@router.head("/download/{file_id}")
+async def head_download_file(
+    file_id: int,
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+):
+    """
+    HEAD-запрос для скачивания файла — возвращает метаданные без тела.
+    """
+    from fastapi.responses import Response
+
+    file_content, filename, content_type = await file_service.download_file(
+        file_id=file_id,
+        user_id=user.id,
+    )
+
+    filename = decode_filename(filename)
+
+    return Response(
+        media_type=content_type,
+        headers={
+            "Content-Disposition": encode_filename_for_header(filename),
+            "Content-Length": str(len(file_content)),
+        },
+    )
+
+
 @router.get("/download/{file_id}")
 async def download_file(
     file_id: int,
@@ -171,7 +198,8 @@ async def download_file(
         io.BytesIO(file_content),
         media_type=content_type,
         headers={
-            "Content-Disposition": encode_filename_for_header(filename)
+            "Content-Disposition": encode_filename_for_header(filename),
+            "Content-Length": str(len(file_content)),
         }
     )
 

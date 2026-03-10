@@ -113,6 +113,12 @@ user: "Запиши это в пространство Учёба" → {"intent"
 
 [История] user: "Расскажи про аналитическую часть" → assistant: "В разделе 3.2.2 описана аналитическая часть..."
 user: "Какие группы принято выделять среди участников рынка?" → {"intent":"rag_query","search_query":"группы участников рынка","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] assistant: Вот ваш файл «Экзамен.docx». Нажмите, чтобы скачать.
+user: "Что такое вырожденное решение?" → {"intent":"rag_query","search_query":"вырожденное решение","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] assistant: Вот ваш файл «Лекция_5.pdf». Нажмите, чтобы скачать.
+user: "Какие методы оптимизации там описаны?" → {"intent":"rag_query","search_query":"методы оптимизации","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
 """
 
 

@@ -88,6 +88,18 @@ class FileAgent:
                     else:
                         result["answer"] = already_msg
                     return result
+                else:
+                    # Контент уже проиндексирован (эмбеддинги есть), но UserFile для этого namespace нет.
+                    # Пропускаем генерацию эмбеддингов — SaveFileNode создаст только UserFile.
+                    logger.info(
+                        "FileAgent: content already indexed (content_file_id=%d), skipping embedding generation",
+                        existing_content.id,
+                    )
+                    return {
+                        "filename": filename,
+                        "content_already_indexed": True,
+                        "agent_steps": agent_steps + ["FileAgent"],
+                    }
         # --- Конец ранней проверки ---
 
         try:

@@ -90,6 +90,12 @@ class AskState(TypedDict, total=False):
     # Уведомление о сохранении файла (используется когда после сохранения нужно выполнить RAG-поиск)
     file_save_notice: Optional[str]
 
+    # True, если пространство было создано автоматически в процессе загрузки файла
+    namespace_created: Optional[bool]
+
+    # True, если контент файла уже проиндексирован (эмбеддинги уже есть в БД)
+    content_already_indexed: Optional[bool]
+
     # Ответ
     agent_steps: list[str]
     answer: str

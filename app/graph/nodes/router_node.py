@@ -20,6 +20,14 @@ URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Паттерн для явных файловых запросов — используется как guard для send_file
+_FILE_REQUEST_TRIGGERS = re.compile(
+    r'(?:скинь|отправь|дай|пришли|покажи файл|найди файл|найди документ|найди реферат'
+    r'|найди конспект|найди презентацию|скачать|есть ли у меня файл'
+    r'|есть ли.*(?:файл|конспект|реферат|документ))',
+    re.IGNORECASE,
+)
+
 # Количество сообщений в истории для поиска контекста
 HISTORY_SCAN_LIMIT = 5
 
@@ -297,15 +305,26 @@ class RouterNode:
             }
 
         if intent == IntentType.SEND_FILE:
-            return {
-                **state,
-                "intent": IntentType.SEND_FILE,
-                "history_file_id": history_file_id,
-                "namespace_id": namespace_id,
-                "namespace_name_hint": namespace_name_hint,
-                "search_query": search_query,
-                "send_file_search_mode": parsed.search_mode or "by_topic",
-                "agent_steps": base_steps + ["[Router] Auto: send_file (LLM)"],
+            # Guard: если вопрос не содержит явных файловых триггеров —
+            # это скорее всего фактический вопрос, а не запрос на отправку файла.
+            # LLM может ошибочно вернуть send_file из-за файлового контекста в истории.
+            if not _FILE_REQUEST_TRIGGERS.search(question):
+                logger.info(
+                    "[Router] Guard: send_file → rag_query (no file triggers in question: %r)",
+                    question[:80],
+                )
+                intent = IntentType.RAG_QUERY
+                search_query = question
+            else:
+                return {
+                    **state,
+                    "intent": IntentType.SEND_FILE,
+                    "history_file_id": history_file_id,
+                    "namespace_id": namespace_id,
+                    "namespace_name_hint": namespace_name_hint,
+                    "search_query": search_query,
+                    "send_file_search_mode": parsed.search_mode or "by_topic",
+                    "agent_steps": base_steps + ["[Router] Auto: send_file (LLM)"],
             }
 
         if intent == IntentType.SAVE_FILE:
@@ -430,9 +449,31 @@ class RouterNode:
                         )
                     else:
                         logger.info(
-                            "[Router] File upload: namespace '%s' not found",
+                            "[Router] File upload: namespace '%s' not found, creating automatically",
                             parsed.namespace_hint,
                         )
+                        # Пространство явно указано, но не найдено — создаём автоматически
+                        namespace_service = configurable.get("namespace_service")
+                        if namespace_service is not None:
+                            try:
+                                new_ns = await namespace_service.namespace_repository.create(
+                                    name=parsed.namespace_hint,
+                                    user_id=user_id,
+                                    description=None,
+                                )
+                                await namespace_service.db.commit()
+                                namespace_id = new_ns.id
+                                namespace_name_hint = parsed.namespace_hint
+                                state = {**state, "namespace_created": True}
+                                logger.info(
+                                    "[Router] File upload: auto-created namespace '%s' → id=%d",
+                                    parsed.namespace_hint, new_ns.id,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "[Router] File upload: failed to auto-create namespace '%s': %s",
+                                    parsed.namespace_hint, exc,
+                                )
             if parsed.intent == IntentType.SUMMARIZE:
                 logger.info("[Router] Auto: summarize (file, LLM)")
                 return {

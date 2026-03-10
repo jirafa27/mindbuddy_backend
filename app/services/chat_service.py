@@ -200,6 +200,7 @@ class ChatService:
                 "summary_agent": self.summary_agent,
                 "file_service": self.file_service,
                 "content_extractor": self.content_extractor,
+                "namespace_service": self.namespace_service,
             }
         }
         result = await self.ask_graph.ainvoke(state, config=config)
