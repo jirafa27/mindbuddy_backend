@@ -17,6 +17,7 @@ class SearchService:
         limit: int = 5,
         namespace_id: Optional[int] = None,
         file_ids: Optional[List[int]] = None,
+        fts_query: Optional[str] = None,
     ) -> List[SearchResultRow]:
         return await self._repo.search(
             query_embedding=query_embedding,
@@ -24,5 +25,6 @@ class SearchService:
             limit=limit,
             namespace_id=namespace_id,
             file_ids=file_ids,
+            fts_query=fts_query,
             sql=sql,
         )

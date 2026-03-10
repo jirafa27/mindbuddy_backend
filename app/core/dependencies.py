@@ -297,6 +297,7 @@ def create_summary_service_for_celery(db: AsyncSession) -> SummaryService:
 def get_chat_service(
     db: AsyncSession = Depends(get_db),
     file_repository: FileRepository = Depends(get_file_repository),
+    user_file_repository: UserFileRepository = Depends(get_user_file_repository),
     vector_repository: VectorRepository = Depends(get_vector_repository),
     search_service: SearchService = Depends(get_search_service),
     summary_service: SummaryService = Depends(get_summary_service),
@@ -317,6 +318,7 @@ def get_chat_service(
     return ChatService(
         db=db,
         file_repository=file_repository,
+        user_file_repository=user_file_repository,
         vector_repository=vector_repository,
         search_service=search_service,
         summary_service=summary_service,

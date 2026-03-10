@@ -14,6 +14,7 @@ from app.domain.protocols import (
     LLMProvider,
     VectorRepository,
     ChatRepository,
+    UserFileRepository,
 )
 from app.domain.entities import ChatEntity, ChatMessageEntity
 from app.core.exceptions import NotFoundError, ForbiddenError
@@ -50,6 +51,7 @@ class ChatService:
         *,
         db: AsyncSession,
         file_repository: FileRepository,
+        user_file_repository: UserFileRepository,
         vector_repository: VectorRepository,
         search_service: SearchService,
         summary_service: SummaryService,
@@ -68,6 +70,7 @@ class ChatService:
     ):
         self.db = db
         self.file_repository = file_repository
+        self.user_file_repository = user_file_repository
         self.chat_repository = chat_repository
         self.vector_repository = vector_repository
         self.search_service = search_service
@@ -190,6 +193,7 @@ class ChatService:
             "configurable": {
                 "async_db": self.db,
                 "file_repository": self.file_repository,
+                "user_file_repository": self.user_file_repository,
                 "vector_repository": self.vector_repository,
                 "search_service": self.search_service,
                 "summary_service": self.summary_service,

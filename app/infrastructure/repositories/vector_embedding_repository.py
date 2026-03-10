@@ -91,6 +91,7 @@ class PgVectorRepository:
         limit: int = 5,
         namespace_id: Optional[int] = None,
         file_ids: Optional[List[int]] = None,
+        fts_query: Optional[str] = None,
         *,
         sql: Optional[str] = None,
     ) -> List[SearchResultRow]:
@@ -102,6 +103,7 @@ class PgVectorRepository:
             limit=limit,
             namespace_id=namespace_id,
             file_ids=file_ids,
+            fts_query=fts_query,
         )
 
     async def _execute_search_sql(
@@ -112,6 +114,7 @@ class PgVectorRepository:
         limit: int = 5,
         namespace_id: Optional[int] = None,
         file_ids: Optional[List[int]] = None,
+        fts_query: Optional[str] = None,
     ) -> List[SearchResultRow]:
         sql = sql.replace(":query_embedding::vector", "CAST(:query_embedding AS vector)")
         sql = sql.replace(":namespace_id::integer", "CAST(:namespace_id AS integer)")
@@ -134,6 +137,9 @@ class PgVectorRepository:
             params["query_embedding"] = "[" + ",".join(str(x) for x in query_embedding) + "]"
         if ":namespace_id" in sql:
             params["namespace_id"] = namespace_id
+        if ":fts_query" in sql:
+            # plainto_tsquery требует непустую строку; при пустом запросе убираем FTS-часть
+            params["fts_query"] = (fts_query or "").strip() or "dummy_never_match"
         try:
             stmt = text(sql).bindparams(**params)
             result = await self.db.execute(stmt)

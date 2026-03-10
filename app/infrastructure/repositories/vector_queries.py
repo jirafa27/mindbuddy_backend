@@ -132,6 +132,108 @@ ORDER BY best_distance
 LIMIT :limit
 """
 
+# Гибридный поиск: векторный (top-30) + полнотекстовый (FTS, русский язык).
+# Объединяет результаты по ve_id, ранжирует по relevance + fts_score.
+# Параметры: :query_embedding, :fts_query, :user_id, :limit.
+# __FILE_IDS__ заменяется на список user_files.id перед выполнением.
+HYBRID_SEARCH_BY_FILES_SQL = """
+WITH fts_matches AS (
+    SELECT ve.id AS ve_id,
+           ve.chunk_text,
+           COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
+           1 - (ve.embedding <=> CAST(:query_embedding AS vector)) AS relevance,
+           ts_rank(to_tsvector('russian', ve.chunk_text),
+                   plainto_tsquery('russian', :fts_query))          AS fts_score
+    FROM vector_embeddings ve
+    JOIN files f ON f.id = ve.file_id
+    JOIN user_files uf ON uf.file_id = ve.file_id
+    WHERE uf.user_id = :user_id
+      AND uf.id IN (__FILE_IDS__)
+      AND to_tsvector('russian', ve.chunk_text) @@ plainto_tsquery('russian', :fts_query)
+),
+vector_top AS (
+    SELECT ve.id AS ve_id,
+           ve.chunk_text,
+           COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
+           1 - (ve.embedding <=> CAST(:query_embedding AS vector)) AS relevance,
+           0::float                                                  AS fts_score
+    FROM vector_embeddings ve
+    JOIN files f ON f.id = ve.file_id
+    JOIN user_files uf ON uf.file_id = ve.file_id
+    WHERE uf.user_id = :user_id
+      AND uf.id IN (__FILE_IDS__)
+    ORDER BY ve.embedding <=> CAST(:query_embedding AS vector)
+    LIMIT 30
+),
+combined AS (
+    SELECT ve_id,
+           MAX(chunk_text)  AS chunk_text,
+           MAX(filename)    AS filename,
+           MAX(relevance)   AS relevance,
+           MAX(fts_score)   AS fts_score
+    FROM (
+        SELECT ve_id, chunk_text, filename, relevance, fts_score FROM fts_matches
+        UNION ALL
+        SELECT ve_id, chunk_text, filename, relevance, fts_score FROM vector_top
+    ) sub
+    GROUP BY ve_id
+)
+SELECT chunk_text, filename, relevance
+FROM combined
+ORDER BY relevance + fts_score DESC
+LIMIT :limit
+"""
+
+# Гибридный поиск по всем файлам пользователя (без фильтра по user_files.id).
+# Параметры: :query_embedding, :fts_query, :user_id, :namespace_id, :limit.
+HYBRID_SEARCH_SQL = """
+WITH fts_matches AS (
+    SELECT ve.id AS ve_id,
+           ve.chunk_text,
+           COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
+           1 - (ve.embedding <=> CAST(:query_embedding AS vector)) AS relevance,
+           ts_rank(to_tsvector('russian', ve.chunk_text),
+                   plainto_tsquery('russian', :fts_query))          AS fts_score
+    FROM vector_embeddings ve
+    JOIN files f ON f.id = ve.file_id
+    JOIN user_files uf ON uf.file_id = ve.file_id
+    WHERE uf.user_id = :user_id
+      AND (:namespace_id::integer IS NULL OR uf.namespace_id = :namespace_id)
+      AND to_tsvector('russian', ve.chunk_text) @@ plainto_tsquery('russian', :fts_query)
+),
+vector_top AS (
+    SELECT ve.id AS ve_id,
+           ve.chunk_text,
+           COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
+           1 - (ve.embedding <=> CAST(:query_embedding AS vector)) AS relevance,
+           0::float                                                  AS fts_score
+    FROM vector_embeddings ve
+    JOIN files f ON f.id = ve.file_id
+    JOIN user_files uf ON uf.file_id = ve.file_id
+    WHERE uf.user_id = :user_id
+      AND (:namespace_id::integer IS NULL OR uf.namespace_id = :namespace_id)
+    ORDER BY ve.embedding <=> CAST(:query_embedding AS vector)
+    LIMIT 30
+),
+combined AS (
+    SELECT ve_id,
+           MAX(chunk_text)  AS chunk_text,
+           MAX(filename)    AS filename,
+           MAX(relevance)   AS relevance,
+           MAX(fts_score)   AS fts_score
+    FROM (
+        SELECT ve_id, chunk_text, filename, relevance, fts_score FROM fts_matches
+        UNION ALL
+        SELECT ve_id, chunk_text, filename, relevance, fts_score FROM vector_top
+    ) sub
+    GROUP BY ve_id
+)
+SELECT chunk_text, filename, relevance
+FROM combined
+ORDER BY relevance + fts_score DESC
+LIMIT :limit
+"""
+
 # Поиск файла по буквальному вхождению текста в чанки (ILIKE).
 # Возвращает файл с наибольшим количеством совпадающих чанков.
 FIND_FILE_BY_CONTENT_SQL = """

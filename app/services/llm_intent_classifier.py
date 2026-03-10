@@ -65,6 +65,10 @@ intent — одно из: rag_query | send_file | list_files | summarize | save_
 - есть слово "файл/документ/реферат/конспект" → send_file
 - нет → rag_query
 
+search_query — поисковый запрос из ТЕКУЩЕГО вопроса пользователя.
+Историю диалога используй ТОЛЬКО для раскрытия местоимений ("это", "этот", "его", "её", "там") и явно неполных вопросов.
+Если вопрос конкретный и самодостаточный — НЕ замещай search_query темами из предыдущих ответов ассистента.
+
 Местоимения ("это", "этот", "его", "её") — раскрой через историю диалога.
 entity_description = null если пользователь явно не указал описание.
 
@@ -106,6 +110,9 @@ user: "Сохрани суммаризацию в пространство КВ�
 
 [История] assistant: Краткий итог: Python — интерпретируемый язык...
 user: "Запиши это в пространство Учёба" → {"intent":"save_summary","search_query":null,"namespace_hint":"Учёба","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] user: "Расскажи про аналитическую часть" → assistant: "В разделе 3.2.2 описана аналитическая часть..."
+user: "Какие группы принято выделять среди участников рынка?" → {"intent":"rag_query","search_query":"группы участников рынка","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
 """
 
 
