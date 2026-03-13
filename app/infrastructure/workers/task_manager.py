@@ -36,3 +36,21 @@ class TaskManager:
             args=[url, user_id],
         )
         return str(result.id) if result and getattr(result, "id", None) else None
+
+    def send_bulk_edit_task(
+        self,
+        file_ids: list[int],
+        user_id: int,
+        edit_instruction: str,
+        namespace_id: Optional[int] = None,
+    ) -> Optional[str]:
+        result = self._celery.send_task(
+            "bulk_edit_files",
+            kwargs={
+                "file_ids": file_ids,
+                "user_id": user_id,
+                "edit_instruction": edit_instruction,
+                "namespace_id": namespace_id,
+            },
+        )
+        return str(result.id) if result and getattr(result, "id", None) else None

@@ -34,3 +34,4 @@ class AskResponse(BaseModel):
     agent_steps: list[str] = Field(default_factory=list, description="Цепочка агентов, выполнявших запрос")
     file_ids: List[int] = Field(default_factory=list, description="Список ID файлов (для скачивания или один созданный)")
     chat_id: Optional[int] = Field(None, description="ID чата (текущий или созданный)")
+    task_id: Optional[str] = Field(None, description="ID фоновой задачи (для полинга статуса)")

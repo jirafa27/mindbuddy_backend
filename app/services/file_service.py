@@ -991,7 +991,11 @@ class FileService:
         task_publisher: Optional[TaskPublisher] = None,
     ) -> FileInfo:
         """
-        Заменяет содержимое существующего файла in-place.
+        Заменяет содержимое существующего файла.
+
+        Если на File ссылаются несколько UserFile (файл в нескольких пространствах),
+        применяется Copy-on-Write: создаётся новый File, а текущий UserFile
+        переключается на него. Остальные UserFile остаются нетронутыми.
 
         Проверяет владельца, перезаписывает файл в хранилище, обновляет метаданные в БД,
         инвалидирует суммаризацию, удаляет эмбеддинги и перезапускает конвейер индексации.
@@ -1018,25 +1022,88 @@ class FileService:
         if not text or not text.strip():
             raise ValidationError("File content is empty or could not be processed")
 
-        await self.storage.upload_file(
-            file_content=file_content,
-            object_name=content_file.file_path,
-            content_type=self._get_content_type(file_ext),
-            metadata={
-                "user_id": str(user_id),
-                "namespace_id": str(user_file.namespace_id or ""),
-                "original_filename": base64.b64encode(filename.encode("utf-8")).decode("ascii"),
-            },
-        )
-
         new_hash = self.compute_content_hash(file_content)[:64]
-        existing_meta = content_file.media_metadata or {}
         updated_meta = {
-            **existing_meta,
+            **(content_file.media_metadata or {}),
             "title": filename,
             "file_type": file_ext,
             "file_size": len(file_content),
         }
+        upload_metadata = {
+            "user_id": str(user_id),
+            "namespace_id": str(user_file.namespace_id or ""),
+            "original_filename": base64.b64encode(filename.encode("utf-8")).decode("ascii"),
+        }
+        publisher = task_publisher or self.task_publisher
+
+        # --- Copy-on-Write: если File используется несколькими UserFile ---
+        ref_count = await self.user_file_repository.count_by_file_id(content_file.id)
+        if ref_count > 1:
+            logger.info(
+                "[FileService] COW: File %d has %d refs, creating new File for UserFile %d",
+                content_file.id, ref_count, user_file.id,
+            )
+            # Создаём новый файл в MinIO с новым путём
+            new_object_name = self.storage.generate_object_name(
+                user_id=user_id,
+                namespace_id=user_file.namespace_id,
+                filename=filename,
+            )
+            await self.storage.upload_file(
+                file_content=file_content,
+                object_name=new_object_name,
+                content_type=self._get_content_type(file_ext),
+                metadata=upload_metadata,
+            )
+            # Создаём новую запись File
+            new_file = await self.file_repository.create(
+                content_hash=new_hash,
+                file_path=new_object_name,
+                media_metadata=updated_meta,
+                processing_status="pending",
+            )
+            # Переключаем UserFile на новый File
+            await self.user_file_repository.update_file_id(user_file.id, new_file.id)
+            # Обновляем custom_title
+            if self.db:
+                from sqlalchemy import update
+                await self.db.execute(
+                    update(UserFile).where(UserFile.id == user_file.id).values(custom_title=filename)
+                )
+            # Запускаем индексацию для нового File
+            if publisher:
+                publisher.send_embeddings_task(
+                    content_file_id=new_file.id,
+                    text=text,
+                    namespace_id=user_file.namespace_id,
+                    filename=filename,
+                    user_file_id=user_file.id,
+                )
+                logger.info("[FileService] COW: sent embeddings task for new file %d", new_file.id)
+
+            await self.db.commit()
+
+            return FileInfo(
+                user_file_id=user_file.id,
+                content_file_id=new_file.id,
+                user_id=user_id,
+                namespace_id=user_file.namespace_id,
+                filename=filename,
+                file_type=self._get_content_type(file_ext),
+                file_size=len(file_content),
+                created_at=new_file.created_at,
+                updated_at=datetime.utcnow(),
+                file_path=new_object_name,
+            )
+
+        # --- Стандартный путь: единственный владелец, edit in-place ---
+        await self.storage.upload_file(
+            file_content=file_content,
+            object_name=content_file.file_path,
+            content_type=self._get_content_type(file_ext),
+            metadata=upload_metadata,
+        )
+
         await self.file_repository.update_content_metadata(
             file_id=content_file.id,
             content_hash=new_hash,
@@ -1058,7 +1125,6 @@ class FileService:
             await self.vector_repository.delete_by_file_id(content_file.id)
             logger.info("[FileService] Deleted embeddings for file %d", content_file.id)
 
-        publisher = task_publisher or self.task_publisher
         if publisher:
             publisher.send_embeddings_task(
                 content_file_id=content_file.id,

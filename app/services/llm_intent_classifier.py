@@ -59,7 +59,12 @@ intent — одно из: rag_query | send_file | list_files | summarize | save_
    delete_namespace: namespace_hint = удаляемое пространство.
    move_file: entity_name = файл, namespace_hint = пространство назначения.
 
-8. general_chat — всё остальное: приветствия, болтовня.
+8. edit_file — изменить содержимое существующего файла.
+   entity_content = КРАТКАЯ ИНСТРУКЦИЯ по изменению (НЕ полный текст файла!).
+   Примеры инструкций: "добавь в начало: "Привет", "замени X на Y", "удали абзац про Z".
+   entity_name / search_query = название файла для поиска.
+
+9. general_chat — всё остальное: приветствия, болтовня.
 
 Если сомневаешься между rag_query и send_file:
 - есть слово "файл/документ/реферат/конспект" → send_file
@@ -88,6 +93,7 @@ entity_description = null если пользователь явно не ука
 "запиши в пространство Inbox: встреча в пятницу в 15:00" → {"intent":"create_file","search_query":null,"namespace_hint":"Inbox","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":"встреча в пятницу в 15:00"}
 "удали файл отчёт_2024.pdf" → {"intent":"delete_file","search_query":"отчёт_2024.pdf","namespace_hint":null,"search_mode":null,"entity_name":"отчёт_2024.pdf","entity_description":null,"entity_content":null}
 "измени заметку Идеи: добавь Go в список языков" → {"intent":"edit_file","search_query":"Идеи","namespace_hint":null,"search_mode":null,"entity_name":"Идеи","entity_description":null,"entity_content":"добавь Go в список языков"}
+"Отредактируй файл Экзамен. Нужно в начале файла написать: КВАААААААААА" → {"intent":"edit_file","search_query":"Экзамен","namespace_hint":null,"search_mode":null,"entity_name":"Экзамен","entity_description":null,"entity_content":"добавь в начало файла: КВАААААААААА"}
 "создай пространство Учёба с описанием университетские материалы" → {"intent":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"Учёба","entity_description":"университетские материалы","entity_content":null}
 "удали пространство Работа" → {"intent":"delete_namespace","search_query":null,"namespace_hint":"Работа","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
 "переименуй пространство Пурум в Архив" → {"intent":"edit_namespace","search_query":null,"namespace_hint":"Пурум","search_mode":null,"entity_name":"Пурум","entity_description":null,"entity_content":"Архив"}
@@ -182,35 +188,35 @@ def _parse_json(raw: str, question: str) -> ParsedIntent:
 
     # Ищем первый {...} блок
     brace_match = re.search(r"\{[\s\S]*\}", text)
+    data: Optional[dict] = None
+
     if not brace_match:
         logger.warning("[LLMIntentClassifier] No JSON object found in response: %r", raw[:200])
-        return _make_fallback(question)
+    else:
+        json_str = brace_match.group(0)
 
-    json_str = brace_match.group(0)
-
-    # Попытка 1: парсим как есть
-    data: Optional[dict] = None
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as exc:
-        logger.warning("[LLMIntentClassifier] JSON parse error: %s | raw: %r", exc, raw[:200])
-
-    # Попытка 2: чистим управляющие символы внутри строк
-    if data is None:
+        # Попытка 1: парсим как есть
         try:
-            data = json.loads(_sanitize_json_string(json_str))
-            logger.info("[LLMIntentClassifier] Parsed JSON after sanitizing control chars")
-        except json.JSONDecodeError:
-            pass
+            data = json.loads(json_str)
+        except json.JSONDecodeError as exc:
+            logger.warning("[LLMIntentClassifier] JSON parse error: %s | raw: %r", exc, raw[:200])
 
-    # Попытка 3: обрезаем лишние данные после первого корректного объекта
-    if data is None:
-        try:
-            decoder = json.JSONDecoder()
-            data, _ = decoder.raw_decode(_sanitize_json_string(text))
-            logger.info("[LLMIntentClassifier] Parsed JSON via raw_decode")
-        except json.JSONDecodeError:
-            pass
+        # Попытка 2: чистим управляющие символы внутри строк
+        if data is None:
+            try:
+                data = json.loads(_sanitize_json_string(json_str))
+                logger.info("[LLMIntentClassifier] Parsed JSON after sanitizing control chars")
+            except json.JSONDecodeError:
+                pass
+
+        # Попытка 3: обрезаем лишние данные после первого корректного объекта
+        if data is None:
+            try:
+                decoder = json.JSONDecoder()
+                data, _ = decoder.raw_decode(_sanitize_json_string(text))
+                logger.info("[LLMIntentClassifier] Parsed JSON via raw_decode")
+            except json.JSONDecodeError:
+                pass
 
     # Если JSON так и не распарсился — пробуем вытащить intent regex-ом
     if data is None:
@@ -226,7 +232,7 @@ def _parse_json(raw: str, question: str) -> ParsedIntent:
                 search_mode=None,
                 entity_name=_try_extract_str_field(raw, "entity_name"),
                 entity_description=_try_extract_str_field(raw, "entity_description"),
-                entity_content=None,  # не восстанавливаем многострочный контент из сломанного JSON
+                entity_content=_try_extract_str_field(raw, "entity_content"),
             )
         return _make_fallback(question)
 

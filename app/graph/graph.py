@@ -131,6 +131,9 @@ def build_ask_graph(
     crud_node = CrudNode(
         file_service=file_service,
         namespace_service=namespace_service,
+        llm_service=llm_service,
+        storage=file_service.storage if file_service else None,
+        task_publisher=task_publisher,
     )
     file_agent = FileAgent(
         file_reader_factory=file_reader_factory,

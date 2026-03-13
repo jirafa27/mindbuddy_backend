@@ -157,6 +157,14 @@ class UserFileRepository(Protocol):
     async def find_by_user_and_file(self, user_id: int, file_id: int, namespace_id: Optional[int] = None) -> Optional[UserFileEntity]:
         ...
 
+    async def count_by_file_id(self, file_id: int) -> int:
+        """Количество UserFile, ссылающихся на данный File (content file)."""
+        ...
+
+    async def update_file_id(self, user_file_id: int, new_file_id: int) -> Optional[UserFileEntity]:
+        """Переключает UserFile на другой File (для Copy-on-Write при редактировании)."""
+        ...
+
 
 class UserRepository(Protocol):
     """Протокол репозитория пользователей."""
@@ -348,6 +356,16 @@ class TaskPublisher(Protocol):
 
     def send_summary_url_task(self, url: str, user_id: int) -> Optional[str]:
         """Постановка задачи на суммаризацию по URL. Возвращает task_id или None."""
+        ...
+
+    def send_bulk_edit_task(
+        self,
+        file_ids: list[int],
+        user_id: int,
+        edit_instruction: str,
+        namespace_id: Optional[int] = None,
+    ) -> Optional[str]:
+        """Постановка задачи на массовое редактирование файлов. Возвращает task_id или None."""
         ...
 
 

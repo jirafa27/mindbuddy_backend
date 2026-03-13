@@ -254,6 +254,23 @@ class RouterNode:
 
         intent = parsed.intent
         search_query = parsed.search_query
+        
+        # Fallback: если namespace_hint=None но search_query есть и intent=edit_file,
+        # пытаемся резолвить namespace по search_query (например: "В начало каждого файла из пространства Пурум...")
+        if (namespace_id is None and not namespace_name_hint and 
+            intent == IntentType.EDIT_FILE and search_query):
+            configurable = config.get("configurable") or {}
+            db = configurable.get("async_db")
+            user_id = state.get("user_id")
+            if db and user_id is not None:
+                resolved = await self._resolve_namespace_id(db, user_id, search_query)
+                if resolved is not None:
+                    namespace_id = resolved
+                    namespace_name_hint = search_query
+                    logger.info(
+                        "[Router] Resolved namespace from search_query '%s' → id=%d",
+                        search_query, resolved,
+                    )
         search_file_ids = state.get("search_file_ids")
         base_steps = state.get("agent_steps", [])
 

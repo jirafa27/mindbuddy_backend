@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.db.models import UserFile, File
@@ -96,5 +96,22 @@ class PgUserFileRepository:
         if row is None:
             return None
         row.namespace_id = namespace_id
+        await self.db.flush()
+        return self._to_entity(row)
+
+    async def count_by_file_id(self, file_id: int) -> int:
+        """Количество UserFile, ссылающихся на данный File (content file)."""
+        result = await self.db.execute(
+            select(func.count()).select_from(UserFile).where(UserFile.file_id == file_id)
+        )
+        return result.scalar_one()
+
+    async def update_file_id(self, user_file_id: int, new_file_id: int) -> Optional[UserFileEntity]:
+        """Переключает UserFile на другой File (для Copy-on-Write при редактировании)."""
+        result = await self.db.execute(select(UserFile).where(UserFile.id == user_file_id))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        row.file_id = new_file_id
         await self.db.flush()
         return self._to_entity(row)
