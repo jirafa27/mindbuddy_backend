@@ -4,6 +4,12 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class UserFileCreateRequest(BaseModel):
+    """Запрос на привязку уже загруженного файла к пространству пользователя."""
+    file_id: int = Field(..., description="ID контент-файла (files.id)")
+    namespace_id: Optional[int] = Field(None, description="ID пространства (null — Inbox)")
+
+
 class ContentExtractResponse(BaseModel):
     """Ответ после извлечения контента по URL (без суммаризации)."""
     file_id: int = Field(..., description="ID контент-файла (files.id) для передачи в /summary и /attach")

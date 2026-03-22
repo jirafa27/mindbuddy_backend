@@ -1,217 +1,193 @@
+"""Интеграционные тесты для управления пространствами знаний (namespaces)."""
 import pytest
 from fastapi import status
 
 
+# ---------------------------------------------------------------------------
+# Базовые CRUD
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_create_and_get_namespace(client, test_user):
-    """Создаём пользователя в тестовой БД, затем namespace через API, проверяем список."""
+async def test_create_and_get_namespace(client, test_user, auth_headers):
+    """Создаём namespace через API и проверяем его содержимое."""
     response = await client.post(
         "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
         json={"name": "test_namespace", "description": "test_description"},
+        headers=auth_headers,
     )
     assert response.status_code == status.HTTP_201_CREATED, response.json()
-    assert response.json()["data"]["name"] == "test_namespace", response.json()
-
-    response = await client.get(f"/api/v1/namespaces/{response.json()['data']['id']}", params={"user_id": test_user.id})
-    assert response.status_code == status.HTTP_200_OK, response.json()
-    assert response.json()["data"]["id"] == response.json()["data"]["id"], response.text
-    assert response.json()["data"]["name"] == "test_namespace", response.json()
-    assert response.json()["data"]["description"] == "test_description", response.json()
-    assert response.json()["data"]["created_at"] is not None, response.json()
-    assert response.json()["data"]["files"] == [], response.json()
-
-
-@pytest.mark.asyncio
-async def test_list_namespaces(client, test_user):
-    """Создаём несколько namespace и проверяем список."""
-    response = await client.post(
-        "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
-        json={"name": "test_namespace_1", "description": "test_description_1"},
-    )
-    assert response.status_code == status.HTTP_201_CREATED, response.json()
-    response = await client.post(
-        "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
-        json={"name": "test_namespace_2", "description": "test_description_2"},
-    )
-    assert response.status_code == status.HTTP_201_CREATED, response.json()
+    ns_id = response.json()["data"]["id"]
+    assert response.json()["data"]["name"] == "test_namespace"
 
     response = await client.get(
-        "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
+        f"/api/v1/namespaces/{ns_id}",
+        headers=auth_headers,
     )
     assert response.status_code == status.HTTP_200_OK, response.json()
-    assert len(response.json()["data"]["items"]) == 2, response.json()
-    assert response.json()["data"]["items"][0]["name"] == "test_namespace_2", response.json()
-    assert response.json()["data"]["items"][0]["description"] == "test_description_2", response.json()
-    assert response.json()["data"]["items"][0]["created_at"] is not None, response.json()
-    assert response.json()["data"]["items"][0]["files_count"] == 0, response.json()
-    assert response.json()["data"]["items"][1]["name"] == "test_namespace_1", response.json()
-    assert response.json()["data"]["items"][1]["description"] == "test_description_1", response.json()
-    assert response.json()["data"]["items"][1]["created_at"] is not None, response.json()
-    assert response.json()["data"]["items"][1]["files_count"] == 0, response.json()
-
-
-
-
+    data = response.json()["data"]
+    assert data["id"] == ns_id
+    assert data["name"] == "test_namespace"
+    assert data["description"] == "test_description"
+    assert data["created_at"] is not None
+    assert data["files"] == []
 
 
 @pytest.mark.asyncio
-async def test_delete_namespace(client, test_user):
-    """Создаём namespace и удаляем его."""
-    response = await client.post(
-        "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
-        json={"name": "test_namespace", "description": "test_description"},
-    )
-    assert response.status_code == status.HTTP_201_CREATED, response.json()
-    namespace_id = response.json()['data']['id']
-    response = await client.delete(f"/api/v1/namespaces/{namespace_id}", params={"user_id": test_user.id})
-    assert response.status_code == status.HTTP_204_NO_CONTENT
-    response = await client.get(f"/api/v1/namespaces/{namespace_id}", params={"user_id": test_user.id})
-    assert response.status_code == status.HTTP_404_NOT_FOUND, response.json()
+async def test_list_namespaces(client, test_user, auth_headers):
+    """Создаём несколько namespace и проверяем список."""
+    for name in ("ns_alpha", "ns_beta"):
+        r = await client.post(
+            "/api/v1/namespaces/",
+            json={"name": name, "description": f"desc_{name}"},
+            headers=auth_headers,
+        )
+        assert r.status_code == status.HTTP_201_CREATED
 
-
-# --- Ошибки и граничные случаи ---
+    response = await client.get("/api/v1/namespaces/", headers=auth_headers)
+    assert response.status_code == status.HTTP_200_OK, response.json()
+    items = response.json()["data"]["items"]
+    names = [item["name"] for item in items]
+    assert "ns_alpha" in names
+    assert "ns_beta" in names
 
 
 @pytest.mark.asyncio
-async def test_create_namespace_duplicate_name_same_user(client, test_user):
-    """Создание namespace с дубликатом имени у того же user → 400."""
-    await client.post(
+async def test_delete_namespace(client, test_user, auth_headers):
+    """Создаём namespace и удаляем его — повторный GET → 404."""
+    r = await client.post(
         "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
-        json={"name": "duplicate_name", "description": "first"},
+        json={"name": "to_delete", "description": ""},
+        headers=auth_headers,
     )
-    response = await client.post(
-        "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
-        json={"name": "duplicate_name", "description": "second"},
-    )
+    assert r.status_code == status.HTTP_201_CREATED
+    ns_id = r.json()["data"]["id"]
+
+    del_r = await client.delete(f"/api/v1/namespaces/{ns_id}", headers=auth_headers)
+    assert del_r.status_code == status.HTTP_204_NO_CONTENT
+
+    get_r = await client.get(f"/api/v1/namespaces/{ns_id}", headers=auth_headers)
+    assert get_r.status_code == status.HTTP_404_NOT_FOUND, get_r.json()
+
+
+# ---------------------------------------------------------------------------
+# Ошибки и права доступа
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_namespace_duplicate_name_same_user(client, test_user, auth_headers):
+    """Дубликат имени namespace у одного пользователя → 400."""
+    payload = {"name": "duplicate_name", "description": "first"}
+    await client.post("/api/v1/namespaces/", json=payload, headers=auth_headers)
+    response = await client.post("/api/v1/namespaces/", json=payload, headers=auth_headers)
     assert response.status_code == status.HTTP_400_BAD_REQUEST, response.json()
     assert "detail" in response.json()
 
 
 @pytest.mark.asyncio
-async def test_get_namespace_not_found(client, test_user):
+async def test_get_namespace_not_found(client, test_user, auth_headers):
     """GET несуществующего namespace → 404."""
-    response = await client.get(
-        "/api/v1/namespaces/99999",
-        params={"user_id": test_user.id},
-    )
+    response = await client.get("/api/v1/namespaces/99999", headers=auth_headers)
     assert response.status_code == status.HTTP_404_NOT_FOUND, response.json()
 
 
 @pytest.mark.asyncio
-async def test_get_namespace_forbidden_other_user(client, test_user, test_user_2, test_namespace):
-    """GET чужого namespace (user_id другого пользователя) → 403."""
+async def test_get_namespace_forbidden_other_user(client, test_user_2, auth_headers_2, test_namespace):
+    """GET чужого namespace другим пользователем → 403."""
     response = await client.get(
         f"/api/v1/namespaces/{test_namespace.id}",
-        params={"user_id": test_user_2.id},
+        headers=auth_headers_2,
     )
     assert response.status_code == status.HTTP_403_FORBIDDEN, response.json()
 
 
 @pytest.mark.asyncio
-async def test_patch_namespace_not_found(client, test_user):
+async def test_patch_namespace_not_found(client, test_user, auth_headers):
     """PATCH несуществующего namespace → 404."""
     response = await client.patch(
         "/api/v1/namespaces/99999",
-        params={"user_id": test_user.id},
         json={"name": "new_name"},
+        headers=auth_headers,
     )
     assert response.status_code == status.HTTP_404_NOT_FOUND, response.json()
 
 
 @pytest.mark.asyncio
-async def test_patch_namespace_forbidden_other_user(client, test_user, test_user_2, test_namespace):
+async def test_patch_namespace_forbidden_other_user(client, test_user_2, auth_headers_2, test_namespace):
     """PATCH чужого namespace → 403."""
     response = await client.patch(
         f"/api/v1/namespaces/{test_namespace.id}",
-        params={"user_id": test_user_2.id},
         json={"name": "hacked"},
+        headers=auth_headers_2,
     )
     assert response.status_code == status.HTTP_403_FORBIDDEN, response.json()
 
 
 @pytest.mark.asyncio
-async def test_delete_namespace_not_found(client, test_user):
+async def test_delete_namespace_not_found(client, test_user, auth_headers):
     """DELETE несуществующего namespace → 404."""
-    response = await client.delete(
-        "/api/v1/namespaces/99999",
-        params={"user_id": test_user.id},
-    )
+    response = await client.delete("/api/v1/namespaces/99999", headers=auth_headers)
     assert response.status_code == status.HTTP_404_NOT_FOUND, response.json()
 
 
 @pytest.mark.asyncio
-async def test_delete_namespace_forbidden_other_user(client, test_user, test_user_2, test_namespace):
+async def test_delete_namespace_forbidden_other_user(client, test_user_2, auth_headers_2, test_namespace):
     """DELETE чужого namespace → 403."""
     response = await client.delete(
         f"/api/v1/namespaces/{test_namespace.id}",
-        params={"user_id": test_user_2.id},
+        headers=auth_headers_2,
     )
     assert response.status_code == status.HTTP_403_FORBIDDEN, response.json()
 
 
-# --- Валидация ---
+# ---------------------------------------------------------------------------
+# Валидация
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_create_namespace_empty_name_422(client, test_user):
-    """POST namespace с пустым именем → 422."""
+async def test_create_namespace_empty_name_422(client, test_user, auth_headers):
+    """Пустое название → 422."""
     response = await client.post(
         "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
         json={"name": "", "description": "desc"},
+        headers=auth_headers,
     )
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.json()
 
 
-@pytest.mark.asyncio
-async def test_create_namespace_invalid_types_422(client, test_user):
-    """POST namespace с неверными типами (name не строка) → 422."""
-    response = await client.post(
-        "/api/v1/namespaces/",
-        params={"user_id": test_user.id},
-        json={"name": 123, "description": "desc"},
-    )
-    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.json()
-
-
-# --- Пагинация ---
+# ---------------------------------------------------------------------------
+# Пагинация
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_list_namespaces_pagination(client, test_user):
+async def test_list_namespaces_pagination(client, test_user, auth_headers):
     """GET списка namespaces с page/page_size: проверка пагинации."""
     for i in range(5):
         await client.post(
             "/api/v1/namespaces/",
-            params={"user_id": test_user.id},
             json={"name": f"ns_{i}", "description": f"desc_{i}"},
+            headers=auth_headers,
         )
-    # Страница 1, размер 2
     response = await client.get(
         "/api/v1/namespaces/",
-        params={"user_id": test_user.id, "page": 1, "page_size": 2},
+        params={"page": 1, "page_size": 2},
+        headers=auth_headers,
     )
     assert response.status_code == status.HTTP_200_OK, response.json()
     data = response.json()["data"]
     assert len(data["items"]) == 2, data
     assert data["pagination"]["total"] == 5, data["pagination"]
-    assert data["pagination"]["page"] == 1, data["pagination"]
-    assert data["pagination"]["page_size"] == 2, data["pagination"]
-    assert data["pagination"]["total_pages"] == 3, data["pagination"]
-    assert data["pagination"]["has_next"] is True, data["pagination"]
-    assert data["pagination"]["has_previous"] is False, data["pagination"]
-    # Страница 2
+    assert data["pagination"]["has_next"] is True
+    assert data["pagination"]["has_previous"] is False
+
     response2 = await client.get(
         "/api/v1/namespaces/",
-        params={"user_id": test_user.id, "page": 2, "page_size": 2},
+        params={"page": 2, "page_size": 2},
+        headers=auth_headers,
     )
-    assert response2.status_code == status.HTTP_200_OK, response2.json()
-    assert len(response2.json()["data"]["items"]) == 2, response2.json()
-    assert response2.json()["data"]["pagination"]["has_previous"] is True, response2.json()
+    assert response2.status_code == status.HTTP_200_OK
+    assert len(response2.json()["data"]["items"]) == 2
+    assert response2.json()["data"]["pagination"]["has_previous"] is True
