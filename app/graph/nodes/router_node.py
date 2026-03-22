@@ -89,6 +89,11 @@ class RouterNode:
         r'[«""]([^»""]{1,120}\.[a-zA-Z]{2,6})[»""]',
         re.IGNORECASE,
     )
+    # Паттерн для поиска файла в ответах ассистента: «файл.md» был создан / отредактирован
+    _ASSISTANT_FILE_ACTION_PATTERN = re.compile(
+        r'[«""]([^»""]{1,120}\.[a-zA-Z]{2,6})[»""]\s+(?:был\s+)?(?:создан|отредактирован|перемещён|переименован)',
+        re.IGNORECASE,
+    )
 
     def _extract_active_file_context(
         self, history: List[Dict], history_file_id: Optional[int]
@@ -97,33 +102,40 @@ class RouterNode:
         Строит строку контекста вида «filename.pdf (пространство: Inbox)»
         для передачи в LLM-классификатор.
 
-        Алгоритм: сканируем последние HISTORY_SCAN_LIMIT сообщений.
-        Если находим сообщение с file_ids, ищем имя файла в тексте рядом.
-        Имя пространства — из текста ассистента (паттерн «в пространстве X»).
+        Если history_file_id задан — ищем файл по этому id.
+        Иначе — ищем последний файл из ответов ассистента (создан/отредактирован),
+        чтобы «этого файла» корректно резолвилось без прикреплённого файла.
         """
-        if not history_file_id:
-            return None
-
         filename: Optional[str] = None
         namespace_name: Optional[str] = None
 
         recent = list(reversed(history[-HISTORY_SCAN_LIMIT:]))
 
-        # Ищем имя файла: сначала в сообщениях с file_ids, затем в соседних
-        for msg in recent:
-            file_ids = msg.get("file_ids") or []
-            if history_file_id in file_ids:
-                text = msg.get("text") or ""
-                m = self._FILENAME_PATTERN.search(text)
-                if m:
-                    filename = m.group(1)
-                break
-
-        # Если не нашли в сообщении с file_ids — ищем в тексте любого сообщения
-        if not filename:
+        if history_file_id:
+            # Ищем имя файла: сначала в сообщениях с file_ids, затем в соседних
             for msg in recent:
-                text = msg.get("text") or ""
-                m = self._FILENAME_PATTERN.search(text)
+                file_ids = msg.get("file_ids") or []
+                if history_file_id in file_ids:
+                    msg_text = msg.get("text") or ""
+                    m = self._FILENAME_PATTERN.search(msg_text)
+                    if m:
+                        filename = m.group(1)
+                    break
+
+            if not filename:
+                for msg in recent:
+                    msg_text = msg.get("text") or ""
+                    m = self._FILENAME_PATTERN.search(msg_text)
+                    if m:
+                        filename = m.group(1)
+                        break
+        else:
+            # Ищем последний файл упомянутый в ответах ассистента
+            for msg in recent:
+                if msg.get("role") != "assistant":
+                    continue
+                msg_text = msg.get("text") or ""
+                m = self._ASSISTANT_FILE_ACTION_PATTERN.search(msg_text)
                 if m:
                     filename = m.group(1)
                     break
@@ -131,8 +143,8 @@ class RouterNode:
         # Ищем пространство: «в пространстве X», «в пространство X»
         ns_pattern = re.compile(r'в\s+пространств[еоу]\s+[«""]?([^»""«,.\n]{1,50})[»""]?', re.IGNORECASE)
         for msg in recent:
-            text = msg.get("text") or ""
-            m = ns_pattern.search(text)
+            msg_text = msg.get("text") or ""
+            m = ns_pattern.search(msg_text)
             if m:
                 namespace_name = m.group(1).strip()
                 break
@@ -328,11 +340,32 @@ class RouterNode:
         )
         history_limit = 2 if has_explicit_list else None
 
+        # Коррекция ("нет, ...", "не то, ...") — пользователь исправляет предыдущий ответ.
+        # Ограничиваем историю до 2 сообщений чтобы LLM не тащил контекст из прошлых операций.
+        _CORRECTION_PATTERN = re.compile(
+            r'^(?:нет[,.]?\s|не\s+то[,.]?\s|не\s+так[,.]?\s|исправь[,.]?\s)',
+            re.IGNORECASE,
+        )
+        if _CORRECTION_PATTERN.match(question.strip()):
+            history_limit = min(history_limit or 999, 2)
+            logger.info("[Router] Correction detected — limiting history to 2")
+
+        # Когда пользователь ссылается на «этот файл» без явного имени —
+        # убеждаемся что active_file_ctx заполнен (сканируем ответы ассистента)
+        _THIS_FILE_PATTERN = re.compile(
+            r'этот\s+файл|этого\s+файла|этому\s+файлу|этот\s+документ|этого\s+документа',
+            re.IGNORECASE,
+        )
+        if _THIS_FILE_PATTERN.search(question) and not active_file_ctx:
+            active_file_ctx = self._extract_active_file_context(history, None)
+            if active_file_ctx:
+                logger.info("[Router] Resolved 'этого файла' → %r", active_file_ctx)
+
         # Если выбрано пространство и вопрос ссылается на "все/каждый файл" —
         # передаём реальные имена файлов чтобы LLM не выдумывал их
         ns_files_ctx: Optional[str] = None
         _ALL_FILES_PATTERN = re.compile(
-            r'каждый|каждую|все\s+файл|всех\s+файл|этого\s+пространства|в\s+пространстве',
+            r'каждый|каждую|все\s+файл|всех\s+файл|этого\s+пространства|в\s+этом\s+пространстве',
             re.IGNORECASE,
         )
         if _ALL_FILES_PATTERN.search(question):
@@ -345,6 +378,8 @@ class RouterNode:
                     ns_files_ctx = await self._fetch_namespace_filenames(db, user_id, ns_id_for_files)
                     if ns_files_ctx:
                         logger.info("[Router] Namespace files context: %r", ns_files_ctx[:100])
+                        # Когда файлы известны явно — история только мешает, ограничиваем до 1
+                        history_limit = 1
 
         parsed = await self.classifier.parse(
             question,
@@ -763,6 +798,7 @@ class RouterNode:
         user_id = state.get("user_id")
 
         resolved_actions = []
+        pending_ns_names: list[str] = []  # имена пространств из create_namespace в этом же батче
         for action in actions:
             ns_hint = action.namespace_hint
             ns_id: Optional[int] = None
@@ -776,6 +812,23 @@ class RouterNode:
                 entity_name = ns_hint
                 ns_id = None
                 ns_hint = None
+
+            # Запоминаем имена создаваемых пространств для последующих действий в батче
+            if action.intent == IntentType.CREATE_NAMESPACE and entity_name:
+                pending_ns_names.append(entity_name)
+
+            # Если create_file без namespace_hint, но в этом батче создаётся пространство — используем его
+            if (
+                action.intent == IntentType.CREATE_FILE
+                and ns_id is None
+                and not ns_hint
+                and pending_ns_names
+            ):
+                ns_hint = pending_ns_names[-1]
+                logger.info(
+                    "[Router] Inferred namespace '%s' for create_file from batch create_namespace",
+                    ns_hint,
+                )
 
             resolved_actions.append({
                 "intent": action.intent,

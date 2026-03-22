@@ -13,6 +13,7 @@
 ChatService при следующем сообщении с подтверждением (до вызова графа).
 """
 import logging
+import re
 from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
@@ -324,7 +325,16 @@ class CrudNode:
     # Промпт для LLM, применяющего правку к тексту файла
     _EDIT_FILE_PROMPT = """\
 ВАЖНО: Ты редактор текстовых файлов. Ты ДОЛЖЕН вернуть ПОЛНЫЙ отредактированный текст файла.
-Применяй инструкцию внимательно. Возвращай ТОЛЬКО текст файла после изменений, без комментариев.
+Возвращай ТОЛЬКО текст файла после изменений — никаких пояснений, комментариев, приветствий.
+
+Правила выполнения инструкции:
+- "удали последнюю строку" — убери последнюю непустую строку текста, остальное оставь
+- "удали первую строку" — убери первую строку текста, остальное оставь
+- "удали строку с X" — найди строку содержащую X и убери её
+- "добавь в конец: Y" — добавь Y как новую строку в конце текста
+- "добавь в начало: Y" — добавь Y как новую строку в начале текста
+- "замени X на Y" — замени все вхождения X на Y
+Если инструкция говорит "удали" — соответствующий фрагмент ДОЛЖЕН ОТСУТСТВОВАТЬ в результате.
 
 ===== ТЕКУЩИЙ ТЕКСТ ФАЙЛА =====
 {current_text}
@@ -334,7 +344,53 @@ class CrudNode:
 {edit_instruction}
 ===== КОНЕЦ ИНСТРУКЦИИ =====
 
-Теперь выполни редактирование и верни ПОЛНЫЙ результат:"""
+Выполни инструкцию и верни ПОЛНЫЙ отредактированный текст файла:"""
+
+    # Числа прописью для парсинга "удали три последние строки"
+    _RUS_NUMBERS = {
+        'одну': 1, 'одной': 1, 'один': 1, 'одно': 1,
+        'две': 2, 'двух': 2, 'двум': 2,
+        'три': 3, 'трёх': 3, 'трех': 3,
+        'четыре': 4, 'четырёх': 4, 'четырех': 4,
+        'пять': 5, 'пяти': 5,
+        'шесть': 6, 'шести': 6,
+        'семь': 7, 'семи': 7,
+        'восемь': 8, 'восьми': 8,
+        'девять': 9, 'девяти': 9,
+        'десять': 10, 'десяти': 10,
+    }
+
+    # Простые операции которые выполняются детерминированно без вызова LLM
+    _SIMPLE_EDIT_PATTERNS = [
+        (re.compile(r'удали?\s+последнюю?\s+строку', re.IGNORECASE),
+         lambda t, _m: '\n'.join(t.rstrip('\n').split('\n')[:-1])),
+        (re.compile(r'удали?\s+первую?\s+строку', re.IGNORECASE),
+         lambda t, _m: '\n'.join(t.split('\n')[1:])),
+        (re.compile(r'удали?\s+пустые\s+строки', re.IGNORECASE),
+         lambda t, _m: '\n'.join(line for line in t.split('\n') if line.strip())),
+        # "удали три последние строки", "удали 3 последних строки"
+        (re.compile(
+            r'удали?\s+(\d+|одну?|дв[ае]|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+последни[хе]\s+строк',
+            re.IGNORECASE,
+        ), None),  # обработчик устанавливается динамически в _try_simple_edit
+    ]
+
+    def _try_simple_edit(self, text: str, instruction: str) -> Optional[str]:
+        """Пытается выполнить простую операцию детерминированно. Возвращает None если не распознано."""
+        for pattern, apply in self._SIMPLE_EDIT_PATTERNS:
+            m = pattern.search(instruction)
+            if not m:
+                continue
+            if apply is not None:
+                return apply(text, m)
+            # Динамическая обработка для "N последних строк"
+            raw = m.group(1)
+            n = int(raw) if raw.isdigit() else self._RUS_NUMBERS.get(raw.lower(), 1)
+            lines = text.rstrip('\n').split('\n')
+            if n >= len(lines):
+                return ''
+            return '\n'.join(lines[:-n])
+        return None
 
     async def _edit_file(
         self,
@@ -492,39 +548,48 @@ class CrudNode:
         logger.info("[CrudNode] Editing file %s (ext=%s): instr=%r | truncated=%s original_len=%d text_for_llm_len=%d", 
                     filename, file_ext, edit_instruction, truncated, len(current_text), len(text_for_llm))
 
-        prompt = self._EDIT_FILE_PROMPT.format(
-            current_text=text_for_llm,
-            edit_instruction=edit_instruction,
-        )
-        if truncated:
-            prompt += "\n\n[ВНИМАНИЕ: текст файла обрезан до первых 12000 символов. Остальной текст оставь без изменений.]"
-
-        try:
-            edited_text = await self.llm_service.complete(
-                [
-                    {"role": "system", "text": "Ты редактор текстовых файлов. Возвращай ТОЛЬКО отредактированный текст файла, ничего больше."},
-                    {"role": "user", "text": prompt},
-                ],
-                temperature=0.0,
-                max_tokens=16384,
-            )
+        # Пробуем выполнить простую операцию без LLM
+        simple_result = self._try_simple_edit(current_text, edit_instruction)
+        if simple_result is not None:
+            edited_text = simple_result
             logger.info(
-                "[CrudNode] LLM returned for file %s: result_len=%d (from orig_len=%d, sent=%d) | changed=%s",
-                filename, len(edited_text or ""), len(current_text), len(text_for_llm),
-                edited_text != current_text if edited_text else False
+                "[CrudNode] Simple edit applied for file %s: orig_len=%d result_len=%d",
+                filename, len(current_text), len(edited_text),
             )
-        except Exception as exc:
-            logger.exception("[CrudNode] LLM edit call failed: %s", exc)
-            return {"ok": False, "error": "Ошибка при применении правки через LLM.", "filename": filename}
+        else:
+            prompt = self._EDIT_FILE_PROMPT.format(
+                current_text=text_for_llm,
+                edit_instruction=edit_instruction,
+            )
+            if truncated:
+                prompt += "\n\n[ВНИМАНИЕ: текст файла обрезан до первых 12000 символов. Остальной текст оставь без изменений.]"
 
-        if not edited_text or not edited_text.strip():
-            return {"ok": False, "error": "LLM вернул пустой результат. Файл не изменён.", "filename": filename}
+            try:
+                edited_text = await self.llm_service.complete(
+                    [
+                        {"role": "system", "text": "Ты редактор текстовых файлов. Возвращай ТОЛЬКО отредактированный текст файла, ничего больше."},
+                        {"role": "user", "text": prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=16384,
+                )
+                logger.info(
+                    "[CrudNode] LLM returned for file %s: result_len=%d (from orig_len=%d, sent=%d) | changed=%s",
+                    filename, len(edited_text or ""), len(current_text), len(text_for_llm),
+                    edited_text != current_text if edited_text else False
+                )
+            except Exception as exc:
+                logger.exception("[CrudNode] LLM edit call failed: %s", exc)
+                return {"ok": False, "error": "Ошибка при применении правки через LLM.", "filename": filename}
 
-        # Если текст был обрезан — присоединяем хвост оригинала
-        if truncated:
-            tail_len = len(current_text[max_text_chars:])
-            edited_text = edited_text + current_text[max_text_chars:]
-            logger.info("[CrudNode] Reappended tail: tail_len=%d final_len=%d", tail_len, len(edited_text))
+            if not edited_text or not edited_text.strip():
+                return {"ok": False, "error": "LLM вернул пустой результат. Файл не изменён.", "filename": filename}
+
+            # Если текст был обрезан — присоединяем хвост оригинала
+            if truncated:
+                tail_len = len(current_text[max_text_chars:])
+                edited_text = edited_text + current_text[max_text_chars:]
+                logger.info("[CrudNode] Reappended tail: tail_len=%d final_len=%d", tail_len, len(edited_text))
 
         # Записываем отредактированный текст обратно в оригинальном формате
         if file_ext == "docx":
