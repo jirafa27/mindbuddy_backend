@@ -53,22 +53,32 @@ intent — одно из: rag_query | send_file | list_files | summarize | save_
 6. create_file — создать заметку/файл из нового текста пользователя.
    entity_content = текст файла, entity_name = заголовок.
 
-7. CRUD пространств: create_namespace, edit_namespace, delete_namespace, move_file.
+7. save_file — сохранить ТОЛЬКО ЧТО ЗАГРУЖЕННЫЙ файл (к сообщению прикреплён файл).
+   ВАЖНО: если файл не прикреплён, но пользователь просит сохранить/переместить файл по имени → move_file, НЕ save_file.
+
+8. move_file — переместить СУЩЕСТВУЮЩИЙ файл (уже в системе) в другое пространство.
+   Признак: нет прикреплённого файла, но есть название файла + пространство назначения.
+   entity_name / search_query = название файла, namespace_hint = пространство назначения.
+   Примеры: "сохрани его в КВА", "перемести этот файл в Архив", "положи документ в Учёба".
+
+9. CRUD пространств: create_namespace, edit_namespace, delete_namespace.
    create_namespace: entity_name = название (namespace_hint = null).
    edit_namespace: namespace_hint = редактируемое пространство; entity_description = новое описание; entity_content = новое название (при переименовании).
    delete_namespace: namespace_hint = удаляемое пространство.
-   move_file: entity_name = файл, namespace_hint = пространство назначения.
 
-8. edit_file — изменить содержимое существующего файла.
+10. edit_file — изменить содержимое существующего файла.
    entity_content = КРАТКАЯ ИНСТРУКЦИЯ по изменению (НЕ полный текст файла!).
-   Примеры инструкций: "добавь в начало: "Привет", "замени X на Y", "удали абзац про Z".
+   Примеры инструкций: "добавь в начало: "Привет", "замени X на Y", "удали абзац про Z", "добавь в конец: текст".
    entity_name / search_query = название файла для поиска.
+   Слова-триггеры: "допиши", "добавь в файл", "измени файл", "отредактируй", "в начало/конец файла".
+   ВАЖНО: "допиши в файл X" → edit_file, НЕ create_file.
 
-9. general_chat — всё остальное: приветствия, болтовня.
+11. general_chat — всё остальное: приветствия, болтовня.
 
 Если сомневаешься между rag_query и send_file:
-- есть слово "файл/документ/реферат/конспект" → send_file
-- нет → rag_query
+- пользователь просит ПОЛУЧИТЬ/НАЙТИ/СКАЧАТЬ сам файл (без конкретного вопроса о содержимом) → send_file
+- пользователь задаёт вопрос или просит достать информацию «из файла/документа» → rag_query
+- «скинь/отправь» + «из этого файла/документа» → rag_query (запрос контента, не файла)
 
 search_query — поисковый запрос из ТЕКУЩЕГО вопроса пользователя.
 Историю диалога используй ТОЛЬКО для раскрытия местоимений ("это", "этот", "его", "её", "там") и явно неполных вопросов.
@@ -101,6 +111,16 @@ entity_description = null если пользователь явно не ука
 "перемести файл отчёт.pdf в пространство Архив" → {"intent":"move_file","search_query":"отчёт.pdf","namespace_hint":"Архив","search_mode":null,"entity_name":"отчёт.pdf","entity_description":null,"entity_content":null}
 "привет" → {"intent":"general_chat","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
 
+Примеры save_file vs move_file:
+[Контекст: К сообщению прикреплён файл.]
+user: "Сохрани его в пространство КВА" → {"intent":"save_file","search_query":null,"namespace_hint":"КВА","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[Активный файл: КурсовойпроектАвс.pdf (пространство: Inbox)]
+user: "Сохрани его в пространство КВА" → {"intent":"move_file","search_query":"КурсовойпроектАвс.pdf","namespace_hint":"КВА","search_mode":null,"entity_name":"КурсовойпроектАвс.pdf","entity_description":null,"entity_content":null}
+
+[Активный файл: отчёт_2024.docx (пространство: Inbox)]
+user: "Перемести в Архив" → {"intent":"move_file","search_query":"отчёт_2024.docx","namespace_hint":"Архив","search_mode":null,"entity_name":"отчёт_2024.docx","entity_description":null,"entity_content":null}
+
 Примеры с историей диалога:
 [История] assistant: У вас есть учебно-методическое пособие «Предпринимательство в информационной сфере»...
 user: "Скинь это пособие" → {"intent":"send_file","search_query":"предпринимательство в информационной сфере","namespace_hint":null,"search_mode":"by_topic","entity_name":null,"entity_description":null,"entity_content":null}
@@ -125,6 +145,27 @@ user: "Что такое вырожденное решение?" → {"intent":"
 
 [История] assistant: Вот ваш файл «Лекция_5.pdf». Нажмите, чтобы скачать.
 user: "Какие методы оптимизации там описаны?" → {"intent":"rag_query","search_query":"методы оптимизации","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[Контекст: К сообщению прикреплён файл.]
+user: "Скинь требования к содержанию пояснительной записки из этого файла" → {"intent":"rag_query","search_query":"требования к содержанию пояснительной записки","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[Контекст: К сообщению прикреплён файл.]
+user: "Что там написано про архитектуру системы из этого документа?" → {"intent":"rag_query","search_query":"архитектура системы","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+МУЛЬТИ-ДЕЙСТВИЕ:
+Если пользователь просит выполнить НЕСКОЛЬКО ОТДЕЛЬНЫХ операций в одном сообщении, верни JSON с полем "actions" — массивом, где каждый элемент содержит те же поля что и для одного действия.
+Используй только для CRUD-операций: create_file, create_namespace, move_file, edit_file, delete_file, edit_namespace, delete_namespace.
+НЕ используй для rag_query, summarize, send_file, general_chat.
+КРИТИЧНО: включай в "actions" ТОЛЬКО операции, явно перечисленные в ТЕКУЩЕМ сообщении пользователя. НЕ добавляй операции из истории диалога и НЕ домысливай дополнительные действия.
+
+Примеры мульти-действия:
+"Создай файлы Шутка1, Шутка2, Шутка3 в пространстве Юмор" → {"actions":[{"intent":"create_file","search_query":null,"namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка1","entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка2","entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка3","entity_description":null,"entity_content":null}]}
+"Создай пространства Работа и Учёба" → {"actions":[{"intent":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"Работа","entity_description":null,"entity_content":null},{"intent":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"Учёба","entity_description":null,"entity_content":null}]}
+"В пространстве Архив создай файл Итоги и удали пространство Черновики" → {"actions":[{"intent":"create_file","search_query":null,"namespace_hint":"Архив","search_mode":null,"entity_name":"Итоги","entity_description":null,"entity_content":null},{"intent":"delete_namespace","search_query":null,"namespace_hint":"Черновики","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
+"Удали файлы Шутка1, Шутка2 и Шутка3 из пространства Юмор" → {"actions":[{"intent":"delete_file","search_query":"Шутка1","namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка1","entity_description":null,"entity_content":null},{"intent":"delete_file","search_query":"Шутка2","namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка2","entity_description":null,"entity_content":null},{"intent":"delete_file","search_query":"Шутка3","namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка3","entity_description":null,"entity_content":null}]}
+"Допиши в файлы Совет1.md, Совет2.md и Совет3.md по дополнительному совету" → {"actions":[{"intent":"edit_file","search_query":"Совет1.md","namespace_hint":null,"search_mode":null,"entity_name":"Совет1.md","entity_description":null,"entity_content":"добавь в конец дополнительный совет"},{"intent":"edit_file","search_query":"Совет2.md","namespace_hint":null,"search_mode":null,"entity_name":"Совет2.md","entity_description":null,"entity_content":"добавь в конец дополнительный совет"},{"intent":"edit_file","search_query":"Совет3.md","namespace_hint":null,"search_mode":null,"entity_name":"Совет3.md","entity_description":null,"entity_content":"добавь в конец дополнительный совет"}]}
+ВАЖНО для мульти-действия: "удали" → delete_file или delete_namespace. НИКОГДА не используй create_file для запросов с "удали/удалить/стереть".
+Если пользователь говорит "удали ВСЕ файлы" без перечисления конкретных имён — используй ОДИН интент delete_namespace для удаления всего пространства, а НЕ пытайся угадать список файлов.
 """
 
 
@@ -137,6 +178,7 @@ class ParsedIntent:
     entity_name: Optional[str] = None
     entity_description: Optional[str] = None
     entity_content: Optional[str] = None
+    actions: Optional[list] = field(default=None)  # List[ParsedIntent] для multi_action
 
 
 def _make_fallback(question: str) -> ParsedIntent:
@@ -237,6 +279,15 @@ def _parse_json(raw: str, question: str) -> ParsedIntent:
         return _make_fallback(question)
 
     intent = data.get("intent", "")
+
+    # Проверяем multi-action формат: {"actions": [...]} — с intent или без
+    actions_raw = data.get("actions")
+    if isinstance(actions_raw, list) and actions_raw:
+        sub_actions = _parse_actions_list(actions_raw)
+        if sub_actions:
+            logger.info("[LLMIntentClassifier] Parsed multi_action with %d actions", len(sub_actions))
+            return ParsedIntent(intent="multi_action", actions=sub_actions)
+
     if intent not in _VALID_INTENTS:
         logger.warning("[LLMIntentClassifier] Unknown intent '%s', falling back", intent)
         return _make_fallback(question)
@@ -254,6 +305,30 @@ def _parse_json(raw: str, question: str) -> ParsedIntent:
         entity_description=data.get("entity_description") or None,
         entity_content=data.get("entity_content") or None,
     )
+
+
+def _parse_actions_list(actions_raw: list) -> list:
+    """Разбирает список действий из multi-action JSON."""
+    result = []
+    for item in actions_raw:
+        if not isinstance(item, dict):
+            continue
+        item_intent = item.get("intent", "")
+        if item_intent not in _VALID_INTENTS:
+            continue
+        item_search_mode = item.get("search_mode") or None
+        if item_search_mode and item_search_mode not in _VALID_SEARCH_MODES:
+            item_search_mode = "by_topic"
+        result.append(ParsedIntent(
+            intent=item_intent,
+            search_query=item.get("search_query") or None,
+            namespace_hint=item.get("namespace_hint") or None,
+            search_mode=item_search_mode,
+            entity_name=item.get("entity_name") or None,
+            entity_description=item.get("entity_description") or None,
+            entity_content=item.get("entity_content") or None,
+        ))
+    return result
 
 
 class LLMIntentClassifier:
@@ -283,6 +358,9 @@ class LLMIntentClassifier:
         has_file: bool = False,
         has_url: bool = False,
         history: Optional[List[dict]] = None,
+        active_file_context: Optional[str] = None,
+        history_limit: Optional[int] = None,
+        namespace_files_context: Optional[str] = None,
     ) -> ParsedIntent:
         """
         Разбирает запрос пользователя.
@@ -291,6 +369,11 @@ class LLMIntentClassifier:
         чтобы LLM правильно различал save_file vs summarize.
         history — последние сообщения чата, позволяют разрешить
         местоимения ("это пособие", "скинь его") через контекст диалога.
+        active_file_context — строка вида "filename.pdf (пространство: Inbox)",
+        помогает LLM понять референт местоимений типа "его", "этот файл".
+        history_limit — переопределяет _HISTORY_CONTEXT_LIMIT (например, 1-2 для multi-action).
+        namespace_files_context — список файлов выбранного пространства,
+        позволяет LLM использовать реальные имена при "каждый файл", "все файлы".
         """
         if not question.strip():
             return _make_fallback(question)
@@ -305,7 +388,8 @@ class LLMIntentClassifier:
         # Формируем блок с историей для разрешения местоимённых ссылок
         history_block = ""
         if history:
-            recent = history[-_HISTORY_CONTEXT_LIMIT:]
+            limit = history_limit if history_limit is not None else _HISTORY_CONTEXT_LIMIT
+            recent = history[-limit:] if limit > 0 else []
             lines = []
             for msg in recent:
                 role = (msg.get("role") or "user").strip().lower()
@@ -316,9 +400,23 @@ class LLMIntentClassifier:
             if lines:
                 history_block = "[История диалога]\n" + "\n".join(lines) + "\n\n"
 
+        # Блок с активным файлом
+        active_file_block = ""
+        if active_file_context:
+            active_file_block = f"[Активный файл: {active_file_context}]\n"
+
+        # Блок с файлами выбранного пространства
+        ns_files_block = ""
+        if namespace_files_context:
+            ns_files_block = f"[Файлы выбранного пространства: {namespace_files_context}]\n"
+
         user_text = question
         if context:
             user_text = f"[Контекст: {context}]\n{question}"
+        if active_file_block:
+            user_text = active_file_block + user_text
+        if ns_files_block:
+            user_text = ns_files_block + user_text
         if history_block:
             user_text = history_block + user_text
 

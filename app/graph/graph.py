@@ -15,6 +15,7 @@ from app.graph.nodes.router_node import RouterNode
 from app.graph.nodes.summary_node import SummaryNode
 from app.graph.nodes.index_url_node import IndexUrlNode
 from app.graph.nodes.send_file_node import SendFileNode
+from app.graph.nodes.multi_action_node import MultiActionNode
 from app.domain.protocols import BlobStorage, EmbeddingProvider, TaskPublisher
 from app.services.file_service import FileService
 from app.services.namespace_service import NamespaceService
@@ -40,7 +41,15 @@ def _route_after_router(state: AskState) -> str:
     - rag_query: вопрос по базе -> compute_query_embedding
     
     Если RouterNode уже установил answer (ошибка валидации) — идём в END через mind_buddy.
+    Если pending_actions заполнен — несколько действий -> multi_action_node.
     """
+    if state.get("answer"):
+        return "mind_buddy_agent"
+
+    # Мульти-действие: наличие pending_actions — единственный сигнал, без отдельного intent
+    if state.get("pending_actions"):
+        return "multi_action_node"
+
     intent = state.get("intent")
     
     if state.get("answer"):
@@ -135,6 +144,7 @@ def build_ask_graph(
         storage=file_service.storage if file_service else None,
         task_publisher=task_publisher,
     )
+    multi_action_node = MultiActionNode(crud_node=crud_node)
     file_agent = FileAgent(
         file_reader_factory=file_reader_factory,
         text_chunker=text_chunker,
@@ -153,6 +163,7 @@ def build_ask_graph(
 
     graph.add_node("router", router_node.run)
     graph.add_node("crud_node", crud_node.run)
+    graph.add_node("multi_action_node", multi_action_node.run)
     graph.add_node("file_agent", file_agent.run)
     graph.add_node("save_file_node", save_file_node.run)
     graph.add_node("execute_search_node", execute_search_node.run)
@@ -184,7 +195,8 @@ def build_ask_graph(
         "execute_search_node": "execute_search_node",
         "send_file_node": "send_file_node",
         "crud_node": "crud_node",
-        "mind_buddy_agent": "mind_buddy_agent",  # Для случаев когда RouterNode уже сформировал answer
+        "multi_action_node": "multi_action_node",
+        "mind_buddy_agent": "mind_buddy_agent",
     }
     if content_extractor and task_publisher:
         routing_map["index_url_node"] = "index_url_node"
@@ -206,6 +218,7 @@ def build_ask_graph(
     })
     graph.add_edge("mind_buddy_agent", END)
     graph.add_edge("crud_node", END)
+    graph.add_edge("multi_action_node", END)
 
     # Суммаризация, индексация, отправка файла -> END
     graph.add_edge("summary_node", END)

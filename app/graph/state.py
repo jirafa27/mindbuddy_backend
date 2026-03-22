@@ -87,6 +87,9 @@ class AskState(TypedDict, total=False):
     # Отложенное действие (хранится в чате, передаётся ChatService → grafu при confirm)
     pending_action: Optional[Dict[str, Any]]
 
+    # Список действий для MultiActionNode (multi_action intent)
+    pending_actions: Optional[List[Dict[str, Any]]]
+
     # Уведомление о сохранении файла (используется когда после сохранения нужно выполнить RAG-поиск)
     file_save_notice: Optional[str]
 

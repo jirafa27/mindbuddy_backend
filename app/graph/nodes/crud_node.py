@@ -105,6 +105,8 @@ class CrudNode:
         desc_part = f"\nОписание: {description}" if description else ""
         return {
             "answer": f"Пространство «{namespace.name}» создано.{desc_part}",
+            "created_namespace_id": namespace.id,
+            "created_namespace_name": namespace.name,
             "agent_steps": agent_steps,
         }
 

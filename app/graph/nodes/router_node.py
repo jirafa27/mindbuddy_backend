@@ -28,6 +28,16 @@ _FILE_REQUEST_TRIGGERS = re.compile(
     re.IGNORECASE,
 )
 
+# Паттерн запросов на извлечение содержимого из файла — даже если есть «скинь»,
+# это rag_query («скинь требования из этого файла», «что написано в файле»)
+_CONTENT_EXTRACTION_TRIGGERS = re.compile(
+    r'из\s+(?:этого\s+|данного\s+|прикреплённого\s+|приложенного\s+)?(?:файла|документа|pdf|доки?)'
+    r'|что\s+(?:написано|есть|говорится|там)\s+(?:в|про|о)'
+    r'|содержимое\s+файла'
+    r'|вытащи|извлеки|достань',
+    re.IGNORECASE,
+)
+
 # Количество сообщений в истории для поиска контекста
 HISTORY_SCAN_LIMIT = 5
 
@@ -74,6 +84,66 @@ class RouterNode:
                 return file_ids[0]
         return None
 
+    # Паттерн для извлечения имён файлов из текста сообщений (в кавычках-ёлочках или обычных)
+    _FILENAME_PATTERN = re.compile(
+        r'[«""]([^»""]{1,120}\.[a-zA-Z]{2,6})[»""]',
+        re.IGNORECASE,
+    )
+
+    def _extract_active_file_context(
+        self, history: List[Dict], history_file_id: Optional[int]
+    ) -> Optional[str]:
+        """
+        Строит строку контекста вида «filename.pdf (пространство: Inbox)»
+        для передачи в LLM-классификатор.
+
+        Алгоритм: сканируем последние HISTORY_SCAN_LIMIT сообщений.
+        Если находим сообщение с file_ids, ищем имя файла в тексте рядом.
+        Имя пространства — из текста ассистента (паттерн «в пространстве X»).
+        """
+        if not history_file_id:
+            return None
+
+        filename: Optional[str] = None
+        namespace_name: Optional[str] = None
+
+        recent = list(reversed(history[-HISTORY_SCAN_LIMIT:]))
+
+        # Ищем имя файла: сначала в сообщениях с file_ids, затем в соседних
+        for msg in recent:
+            file_ids = msg.get("file_ids") or []
+            if history_file_id in file_ids:
+                text = msg.get("text") or ""
+                m = self._FILENAME_PATTERN.search(text)
+                if m:
+                    filename = m.group(1)
+                break
+
+        # Если не нашли в сообщении с file_ids — ищем в тексте любого сообщения
+        if not filename:
+            for msg in recent:
+                text = msg.get("text") or ""
+                m = self._FILENAME_PATTERN.search(text)
+                if m:
+                    filename = m.group(1)
+                    break
+
+        # Ищем пространство: «в пространстве X», «в пространство X»
+        ns_pattern = re.compile(r'в\s+пространств[еоу]\s+[«""]?([^»""«,.\n]{1,50})[»""]?', re.IGNORECASE)
+        for msg in recent:
+            text = msg.get("text") or ""
+            m = ns_pattern.search(text)
+            if m:
+                namespace_name = m.group(1).strip()
+                break
+
+        if not filename:
+            return None
+
+        if namespace_name:
+            return f"{filename} (пространство: {namespace_name})"
+        return filename
+
     def _is_url_only(self, text: str) -> bool:
         return bool(URL_PATTERN.fullmatch(text.strip()))
 
@@ -94,6 +164,35 @@ class RouterNode:
             return row["id"] if row else None
         except Exception as exc:
             logger.warning("[Router] Failed to resolve namespace '%s': %s", name, exc)
+            return None
+
+    async def _fetch_namespace_filenames(
+        self, db, user_id: int, namespace_id: int, limit: int = 30
+    ) -> Optional[str]:
+        """
+        Возвращает строку с именами файлов в пространстве для передачи в классификатор.
+        Например: 'Совет1.md, Совет2.md, Совет3.md'
+        """
+        try:
+            result = await db.execute(
+                text(
+                    "SELECT COALESCE(uf.custom_title, f.media_metadata->>'title', "
+                    "f.source_url, f.file_path, 'Document') AS filename "
+                    "FROM user_files uf "
+                    "JOIN files f ON f.id = uf.file_id "
+                    "WHERE uf.user_id = :user_id AND uf.namespace_id = :namespace_id "
+                    "ORDER BY uf.created_at DESC LIMIT :limit"
+                ),
+                {"user_id": user_id, "namespace_id": namespace_id, "limit": limit},
+            )
+            rows = result.mappings().all()
+            if not rows:
+                return None
+            return ", ".join(r["filename"] for r in rows)
+        except Exception as exc:
+            logger.warning(
+                "[Router] Failed to fetch filenames for namespace_id=%d: %s", namespace_id, exc
+            )
             return None
 
     # ------------------------------------------------------------------
@@ -219,11 +318,42 @@ class RouterNode:
             }
 
         # LLM-классификация
+        active_file_ctx = self._extract_active_file_context(history, history_file_id)
+        if active_file_ctx:
+            logger.info("[Router] Active file context for classifier: %r", active_file_ctx)
+        # Сокращаем историю если вопрос содержит несколько явных объектов (запятые + союзы)
+        # — снижает риск того что LLM добавит лишние действия из истории
+        has_explicit_list = question.count(",") >= 2 or bool(
+            re.search(r'\bи\s+(?:создай|удали|перемести|переименуй)\b', question, re.IGNORECASE)
+        )
+        history_limit = 2 if has_explicit_list else None
+
+        # Если выбрано пространство и вопрос ссылается на "все/каждый файл" —
+        # передаём реальные имена файлов чтобы LLM не выдумывал их
+        ns_files_ctx: Optional[str] = None
+        _ALL_FILES_PATTERN = re.compile(
+            r'каждый|каждую|все\s+файл|всех\s+файл|этого\s+пространства|в\s+пространстве',
+            re.IGNORECASE,
+        )
+        if _ALL_FILES_PATTERN.search(question):
+            ns_id_for_files = state.get("namespace_id")
+            if ns_id_for_files:
+                configurable = config.get("configurable") or {}
+                db = configurable.get("async_db")
+                user_id = state.get("user_id")
+                if db and user_id is not None:
+                    ns_files_ctx = await self._fetch_namespace_filenames(db, user_id, ns_id_for_files)
+                    if ns_files_ctx:
+                        logger.info("[Router] Namespace files context: %r", ns_files_ctx[:100])
+
         parsed = await self.classifier.parse(
             question,
             has_file=bool(file_content),
             has_url=bool(detected_url),
             history=history,
+            active_file_context=active_file_ctx,
+            history_limit=history_limit,
+            namespace_files_context=ns_files_ctx,
         )
         logger.info(
             "[Router] LLM parsed: intent=%s search_query=%r namespace_hint=%r search_mode=%s",
@@ -274,6 +404,10 @@ class RouterNode:
         search_file_ids = state.get("search_file_ids")
         base_steps = state.get("agent_steps", [])
 
+        # Мульти-действие: разворачиваем список действий (после base_steps)
+        if parsed.intent == "multi_action" and parsed.actions:
+            return await self._handle_multi_action(state, parsed.actions, base_steps, config)
+
         # Если пользователь выбрал файлы или пространство, а классификатор вернул general_chat — ищем по контексту
         has_file_scope = bool(search_file_ids)
         has_namespace_scope = namespace_id is not None
@@ -322,10 +456,17 @@ class RouterNode:
             }
 
         if intent == IntentType.SEND_FILE:
-            # Guard: если вопрос не содержит явных файловых триггеров —
-            # это скорее всего фактический вопрос, а не запрос на отправку файла.
-            # LLM может ошибочно вернуть send_file из-за файлового контекста в истории.
-            if not _FILE_REQUEST_TRIGGERS.search(question):
+            # Guard 1: если в вопросе есть фраза «из этого файла» / «из документа» —
+            # пользователь хочет контент, а не сам файл.
+            if _CONTENT_EXTRACTION_TRIGGERS.search(question):
+                logger.info(
+                    "[Router] Guard: send_file → rag_query (content extraction phrase: %r)",
+                    question[:80],
+                )
+                intent = IntentType.RAG_QUERY
+                search_query = question
+            # Guard 2: если вопрос вообще не содержит явных триггеров отправки файла
+            elif not _FILE_REQUEST_TRIGGERS.search(question):
                 logger.info(
                     "[Router] Guard: send_file → rag_query (no file triggers in question: %r)",
                     question[:80],
@@ -345,6 +486,25 @@ class RouterNode:
             }
 
         if intent == IntentType.SAVE_FILE:
+            # Guard: нет загруженного файла, но есть search_query + namespace → это move_file
+            # (пользователь хочет переместить существующий файл, а не загрузить новый)
+            if not state.get("file_content") and not parsed.entity_content and parsed.search_query and namespace_id:
+                move_name = parsed.entity_name or parsed.search_query
+                logger.info(
+                    "[Router] save_file → move_file (no upload, existing file '%s' → namespace_id=%s)",
+                    move_name, namespace_id,
+                )
+                return {
+                    **state,
+                    "intent": IntentType.MOVE_FILE,
+                    "namespace_id": namespace_id,
+                    "namespace_name_hint": namespace_name_hint,
+                    "search_query": parsed.search_query,
+                    "entity_name": move_name,
+                    "agent_steps": base_steps + [
+                        f"[Router] Auto: save_file → move_file (no upload, ns={namespace_name_hint})"
+                    ],
+                }
             # Если реального файла нет, но LLM вернул entity_content — создаём файл из текста
             if not state.get("file_content") and parsed.entity_content:
                 logger.info(
@@ -393,13 +553,23 @@ class RouterNode:
             IntentType.DELETE_FILE,
             IntentType.EDIT_FILE,
         ):
+            entity_name = parsed.entity_name
+            # Для create_namespace LLM иногда кладёт название в namespace_hint вместо entity_name
+            if intent == IntentType.CREATE_NAMESPACE and not entity_name and namespace_name_hint:
+                entity_name = namespace_name_hint
+                namespace_name_hint = None
+                namespace_id = None
+                logger.info(
+                    "[Router] create_namespace: moved namespace_hint '%s' → entity_name",
+                    entity_name,
+                )
             return {
                 **state,
                 "intent": intent,
                 "namespace_id": namespace_id,
                 "namespace_name_hint": namespace_name_hint,
                 "search_query": search_query,
-                "entity_name": parsed.entity_name,
+                "entity_name": entity_name,
                 "entity_description": parsed.entity_description,
                 "entity_content": parsed.entity_content,
                 "agent_steps": base_steps + [f"[Router] Auto: {intent} (LLM)"],
@@ -430,6 +600,30 @@ class RouterNode:
     # Вспомогательные маршруты
     # ------------------------------------------------------------------
 
+    async def _inbox_namespace_if_unset(
+        self,
+        namespace_id: Optional[int],
+        namespace_name_hint: Optional[str],
+        config: RunnableConfig,
+        user_id: Optional[int],
+    ) -> tuple[Optional[int], Optional[str]]:
+        """
+        Файл из чата без явного пространства в тексте — кладём в Inbox
+        (не используем namespace_id из query/UI).
+        """
+        if namespace_id is not None:
+            return namespace_id, namespace_name_hint
+        configurable = config.get("configurable") or {}
+        db = configurable.get("async_db")
+        if not db or user_id is None:
+            return None, namespace_name_hint
+        inbox_id = await self._resolve_namespace_id(db, user_id, "Inbox")
+        if inbox_id is not None:
+            logger.info("[Router] Chat file upload: default → Inbox (id=%d)", inbox_id)
+            return inbox_id, "Inbox"
+        logger.warning("[Router] Chat file upload: Inbox not found for user_id=%s", user_id)
+        return None, namespace_name_hint
+
     async def _handle_file_upload(
         self,
         state: AskState,
@@ -440,8 +634,10 @@ class RouterNode:
         config: RunnableConfig,
     ) -> AskState:
         """Файл приложен — определяем: суммаризация или сохранение."""
-        namespace_id = await self._maybe_resolve_namespace(state, config)
+        # Не подставляем namespace из query: только явный текст пользователя или Inbox
+        namespace_id: Optional[int] = None
         namespace_name_hint: Optional[str] = None
+        user_id = state.get("user_id")
         if question:
             history = state.get("history") or []
             parsed = await self.classifier.parse(
@@ -450,11 +646,10 @@ class RouterNode:
                 has_url=bool(detected_url),
                 history=history,
             )
-            # Если LLM нашёл упоминание пространства — резолвим его
-            if parsed.namespace_hint and namespace_id is None:
+            # Явное пространство в сообщении (LLM вытащил hint)
+            if parsed.namespace_hint:
                 configurable = config.get("configurable") or {}
                 db = configurable.get("async_db")
-                user_id = state.get("user_id")
                 if db and user_id is not None:
                     resolved = await self._resolve_namespace_id(db, user_id, parsed.namespace_hint)
                     if resolved is not None:
@@ -493,11 +688,15 @@ class RouterNode:
                                 )
             if parsed.intent == IntentType.SUMMARIZE:
                 logger.info("[Router] Auto: summarize (file, LLM)")
+                namespace_id, namespace_name_hint = await self._inbox_namespace_if_unset(
+                    namespace_id, namespace_name_hint, config, user_id
+                )
                 return {
                     **state,
                     "intent": IntentType.SUMMARIZE,
                     "detected_url": detected_url,
                     "namespace_id": namespace_id,
+                    "namespace_name_hint": namespace_name_hint,
                     "agent_steps": state.get("agent_steps", []) + [
                         "[Router] Auto: summarize (file, LLM)"
                     ],
@@ -507,6 +706,9 @@ class RouterNode:
                     # Нет конкретного поискового запроса — вопрос общего характера о файле,
                     # обрабатываем как суммаризацию
                     logger.info("[Router] Auto: summarize (file, rag_query with no search_query)")
+                    namespace_id, namespace_name_hint = await self._inbox_namespace_if_unset(
+                        namespace_id, namespace_name_hint, config, user_id
+                    )
                     return {
                         **state,
                         "intent": IntentType.SUMMARIZE,
@@ -521,6 +723,9 @@ class RouterNode:
                     "[Router] Auto: save_file (filename=%s) + pending rag_query=%r",
                     filename, parsed.search_query,
                 )
+                namespace_id, namespace_name_hint = await self._inbox_namespace_if_unset(
+                    namespace_id, namespace_name_hint, config, user_id
+                )
                 return {
                     **state,
                     "intent": IntentType.SAVE_FILE,
@@ -532,6 +737,9 @@ class RouterNode:
                         f"[Router] Auto: save_file (filename={filename}, pending rag_query)"
                     ],
                 }
+        namespace_id, namespace_name_hint = await self._inbox_namespace_if_unset(
+            namespace_id, namespace_name_hint, config, user_id
+        )
         logger.info("[Router] Auto: save_file (filename=%s)", filename)
         return {
             **state,
@@ -540,6 +748,52 @@ class RouterNode:
             "namespace_id": namespace_id,
             "namespace_name_hint": namespace_name_hint,
             "agent_steps": state.get("agent_steps", []) + ["[Router] Auto: save_file"],
+        }
+
+    async def _handle_multi_action(
+        self,
+        state: AskState,
+        actions: List,
+        base_steps: list,
+        config: RunnableConfig,
+    ) -> AskState:
+        """Резолвит namespace для каждого действия и складывает список в pending_actions."""
+        configurable = config.get("configurable") or {}
+        db = configurable.get("async_db")
+        user_id = state.get("user_id")
+
+        resolved_actions = []
+        for action in actions:
+            ns_hint = action.namespace_hint
+            ns_id: Optional[int] = None
+            entity_name = action.entity_name
+
+            if ns_hint and db and user_id is not None:
+                ns_id = await self._resolve_namespace_id(db, user_id, ns_hint)
+
+            # Для create_namespace — имя может попасть в namespace_hint вместо entity_name
+            if action.intent == IntentType.CREATE_NAMESPACE and not entity_name and ns_hint:
+                entity_name = ns_hint
+                ns_id = None
+                ns_hint = None
+
+            resolved_actions.append({
+                "intent": action.intent,
+                "namespace_id": ns_id,
+                "namespace_name_hint": ns_hint,
+                "search_query": action.search_query,
+                "entity_name": entity_name,
+                "entity_description": action.entity_description,
+                "entity_content": action.entity_content,
+            })
+
+        logger.info("[Router] multi_action: %d actions resolved", len(resolved_actions))
+        return {
+            **state,
+            "pending_actions": resolved_actions,
+            "agent_steps": base_steps + [
+                f"[Router] Auto: multi_action ({len(resolved_actions)} actions)"
+            ],
         }
 
     def _route_summarize(

@@ -313,6 +313,14 @@ class ChatService:
                 await self.file_service.delete_file(file_id=file_id, user_id=user_id)
                 return f"{target.capitalize()} удалён."
 
+            elif action_type == "batch_delete":
+                items = pending.get("items") or []
+                answers = []
+                for item in items:
+                    answer = await self._execute_pending_action(item, user_id)
+                    answers.append(answer)
+                return "\n".join(answers) if answers else "Все объекты удалены."
+
             else:
                 logger.warning("[ChatService] Unknown pending action type: %s", action_type)
                 return "Неизвестное действие."
