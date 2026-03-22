@@ -81,7 +81,7 @@ intent — одно из: rag_query | send_file | list_files | summarize | save_
 - «скинь/отправь» + «из этого файла/документа» → rag_query (запрос контента, не файла)
 
 search_query — поисковый запрос из ТЕКУЩЕГО вопроса пользователя.
-Историю диалога используй ТОЛЬКО для раскрытия местоимений ("это", "этот", "его", "её", "там") и явно неполных вопросов.
+Историю диалога используй для раскрытия местоимений ("это", "этот", "его", "её", "там"), явно неполных вопросов, а также для понимания подтверждений и отказов на вопросы ассистента.
 Если вопрос конкретный и самодостаточный — НЕ замещай search_query темами из предыдущих ответов ассистента.
 
 Местоимения ("это", "этот", "его", "её") — раскрой через историю диалога.
@@ -145,6 +145,15 @@ user: "Что такое вырожденное решение?" → {"intent":"
 
 [История] assistant: Вот ваш файл «Лекция_5.pdf». Нажмите, чтобы скачать.
 user: "Какие методы оптимизации там описаны?" → {"intent":"rag_query","search_query":"методы оптимизации","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] assistant: "Изучил контент и добавил в вашу базу знаний. Long Now Foundation — Википедия. Хотите сделать краткое резюме?"
+user: "Да" → {"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] assistant: "Хотите суммаризировать этот файл?"
+user: "Да, давай" → {"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] assistant: "Хотите сделать краткое содержание?"
+user: "Нет" → {"intent":"general_chat","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
 
 [Контекст: К сообщению прикреплён файл.]
 user: "Скинь требования к содержанию пояснительной записки из этого файла" → {"intent":"rag_query","search_query":"требования к содержанию пояснительной записки","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}

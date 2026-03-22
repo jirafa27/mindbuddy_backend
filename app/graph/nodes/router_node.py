@@ -318,7 +318,9 @@ class RouterNode:
 
         if detected_url and self._is_url_only(question):
             logger.info("[Router] Auto: index_url (URL only)")
-            namespace_id = await self._maybe_resolve_namespace(state, config)
+            namespace_id, _ = await self._inbox_namespace_if_unset(
+                state.get("namespace_id"), None, config, state.get("user_id")
+            )
             return {
                 **state,
                 "intent": IntentType.INDEX_URL,

@@ -93,6 +93,16 @@ class SummaryService:
                         is_cached=True,
                         method=SummaryMethod.CACHED,
                     )
+                content_file = await self.file_repository.get_by_id(existing_uf.file_id)
+                title = existing_uf.custom_title or (content_file.media_metadata or {}).get("title") if content_file else parsed.title
+                logger.info("[Summary] Reusing existing user_file_id=%d for summarization (no cached summary)", existing_uf.id)
+                return ContentToSummarize(
+                    text=parsed.text,
+                    title=title or parsed.title,
+                    source_url=url,
+                    content_file_id=existing_uf.file_id,
+                    user_file_id=existing_uf.id,
+                )
         user_file = await self.file_service.save_extracted_content(
             user_id=user_id,
             text=parsed.text,
