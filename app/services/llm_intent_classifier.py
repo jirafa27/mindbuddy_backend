@@ -436,7 +436,7 @@ class LLMIntentClassifier:
 
         try:
             raw = await self.llm_service.complete(
-                messages, temperature=0.0, max_tokens=512
+                messages, temperature=0.0, max_tokens=1024
             )
             logger.info("[LLMIntentClassifier] Question: %r | Raw: %r", question[:80], raw[:200])
             result = _parse_json(raw, question)
