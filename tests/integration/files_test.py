@@ -176,8 +176,3 @@ async def test_delete_file_forbidden_other_user(
     response = await client.delete(f"/api/v1/files/{file_id}", headers=auth_headers_2)
     assert response.status_code == status.HTTP_403_FORBIDDEN, response.text
 
-
-# ---------------------------------------------------------------------------
-# Примечание: тест GET /watcher/structure удалён — этот маршрут отсутствует
-# в текущей версии API (нет роутера watcher в app/api/v1/).
-# ---------------------------------------------------------------------------
