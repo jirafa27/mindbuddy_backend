@@ -1,6 +1,6 @@
 """SummaryNode — дирижёр суммаризации: FileService (контент) → SummaryService (кэш) → Agent → SummaryService (сохранение)."""
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 
@@ -62,8 +62,14 @@ class SummaryNode:
             "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no content"],
         }
 
-    def _state_from_response(self, state: AskState, result: SummaryResponse, label: str) -> AskState:
-        answer = self._format_summary_response(result)
+    def _state_from_response(
+        self,
+        state: AskState,
+        result: SummaryResponse,
+        label: str,
+        namespace_name_hint: Optional[str] = None,
+    ) -> AskState:
+        answer = self._format_summary_response(result, namespace_name_hint=namespace_name_hint)
         return {
             **state,
             "summary_result": result.model_dump(),
@@ -120,17 +126,30 @@ class SummaryNode:
                 "answer": "Не удалось найти файл для суммаризации.",
                 "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no file"],
             }
+        namespace_id = state.get("namespace_id")
+        namespace_name_hint = state.get("namespace_name_hint")
         try:
             content_or_cached = await summary_service.get_content_for_summarization_file(
-                file_content=file_content, filename=filename, user_id=user_id
+                file_content=file_content,
+                filename=filename,
+                user_id=user_id,
+                namespace_id=namespace_id,
             )
             if isinstance(content_or_cached, SummaryResponse):
-                return self._state_from_response(state, content_or_cached, f"Summarized file: {filename}")
+                return self._state_from_response(
+                    state, content_or_cached,
+                    f"Summarized file: {filename}",
+                    namespace_name_hint=namespace_name_hint,
+                )
             content = content_or_cached
             summary_result = await summary_agent.summarize(content.text, title=content.title)
             await summary_service.save_summary(content.content_file_id, summary_result)
             result = SummaryService.build_summary_response(content, summary_result)
-            return self._state_from_response(state, result, f"Summarized file: {filename}")
+            return self._state_from_response(
+                state, result,
+                f"Summarized file: {filename}",
+                namespace_name_hint=namespace_name_hint,
+            )
         except ValueError as e:
             return {**state, "answer": f"Ошибка: {e}", "agent_steps": state.get("agent_steps", []) + [f"[SummaryNode] Error: {e}"]}
         except Exception as e:
@@ -172,8 +191,10 @@ class SummaryNode:
             logger.exception("[SummaryNode] Unexpected error")
             return {**state, "answer": f"Произошла ошибка при суммаризации: {e}", "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Exception"]}
 
-    def _format_summary_response(self, result: Any) -> str:
+    def _format_summary_response(self, result: Any, namespace_name_hint: Optional[str] = None) -> str:
         parts = []
+        if namespace_name_hint:
+            parts.append(f"_Файл сохранён в пространство «{namespace_name_hint}»._\n\n")
         if result.title:
             parts.append(f"{result.title}")
         parts.append(result.summary)

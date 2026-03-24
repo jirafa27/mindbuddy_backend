@@ -155,6 +155,15 @@ user: "Да, давай" → {"intent":"summarize","search_query":null,"namespac
 [История] assistant: "Хотите сделать краткое содержание?"
 user: "Нет" → {"intent":"general_chat","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
 
+[История] user: "https://ru.wikipedia.org/wiki/... Письма к госпоже Каландрини — Википедия"
+user: "Суммаризируй" → {"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] assistant: "Изучил контент и добавил в базу знаний."
+user: "Сделай краткое содержание" → {"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
+
+[История] assistant: "Изучил контент и добавил в базу знаний. Статья о Python."
+user: "Сделай краткое содержание и сохрани в пространство Учёба" → {"actions":[{"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"Учёба","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
+
 [Контекст: К сообщению прикреплён файл.]
 user: "Скинь требования к содержанию пояснительной записки из этого файла" → {"intent":"rag_query","search_query":"требования к содержанию пояснительной записки","namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}
 
@@ -163,11 +172,33 @@ user: "Что там написано про архитектуру систем
 
 МУЛЬТИ-ДЕЙСТВИЕ:
 Если пользователь просит выполнить НЕСКОЛЬКО ОТДЕЛЬНЫХ операций в одном сообщении, верни JSON с полем "actions" — массивом, где каждый элемент содержит те же поля что и для одного действия.
-Используй только для CRUD-операций: create_file, create_namespace, move_file, edit_file, delete_file, edit_namespace, delete_namespace.
-НЕ используй для rag_query, summarize, send_file, general_chat.
+Используй для CRUD-операций (create_file, create_namespace, move_file, edit_file, delete_file, edit_namespace, delete_namespace) и для pipeline-цепочек с URL.
+НЕ используй для rag_query, summarize (без URL), send_file, general_chat.
 КРИТИЧНО: включай в "actions" ТОЛЬКО операции, явно перечисленные в ТЕКУЩЕМ сообщении пользователя. НЕ добавляй операции из истории диалога и НЕ домысливай дополнительные действия.
+КРИТИЧНО: если пользователь говорит только "Суммаризируй" / "Сделай краткое содержание" без указания "сохрани/добавь в пространство" — это ОДИН интент summarize, НЕ multi_action.
 
-Примеры мульти-действия:
+Pipeline-цепочки (когда в сообщении есть URL):
+- "сохрани содержимое / добавь текст статьи в пространство X" → одно действие index_url с namespace_hint=X
+- "сохрани саммари / краткое / резюме статьи в пространство X" → цепочка из трёх шагов: index_url → summarize → create_file(namespace_hint=X)
+- если пространство X **новое** (пользователь явно говорит "новое пространство") — добавь create_namespace(entity_name=X) ПЕРВЫМ шагом, затем обычная цепочка
+
+Примеры pipeline-цепочек:
+[Контекст: В сообщении есть URL]
+user: "https://ru.wikipedia.org/wiki/... Добавь текст этой статьи в пространство Статьи" → {"actions":[{"intent":"index_url","search_query":null,"namespace_hint":"Статьи","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
+
+[Контекст: В сообщении есть URL]
+user: "https://ru.wikipedia.org/wiki/... Добавь текст в новое пространство Имя_пространства" → {"actions":[{"intent":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"ХИ","entity_description":null,"entity_content":null},{"intent":"index_url","search_query":null,"namespace_hint":"ХИ","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
+
+[Контекст: В сообщении есть URL]
+user: "https://ru.wikipedia.org/wiki/... Сохрани саммари этой статьи в пространство Статьи" → {"actions":[{"intent":"index_url","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"Статьи","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
+
+[Контекст: В сообщении есть URL]
+user: "https://ru.wikipedia.org/wiki/... Добавь суммаризацию в новое пространство Имя_пространства" → {"actions":[{"intent":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"ХИ","entity_description":null,"entity_content":null},{"intent":"index_url","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"ХИ","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
+
+[Контекст: В сообщении есть URL]
+user: "https://example.com/article Сделай краткое содержание и сохрани в пространство Работа" → {"actions":[{"intent":"index_url","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"intent":"summarize","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"Работа","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
+
+Примеры CRUD мульти-действия:
 "Создай файлы Шутка1, Шутка2, Шутка3 в пространстве Юмор" → {"actions":[{"intent":"create_file","search_query":null,"namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка1","entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка2","entity_description":null,"entity_content":null},{"intent":"create_file","search_query":null,"namespace_hint":"Юмор","search_mode":null,"entity_name":"Шутка3","entity_description":null,"entity_content":null}]}
 "Создай пространства Работа и Учёба" → {"actions":[{"intent":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"Работа","entity_description":null,"entity_content":null},{"intent":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"Учёба","entity_description":null,"entity_content":null}]}
 "В пространстве Архив создай файл Итоги и удали пространство Черновики" → {"actions":[{"intent":"create_file","search_query":null,"namespace_hint":"Архив","search_mode":null,"entity_name":"Итоги","entity_description":null,"entity_content":null},{"intent":"delete_namespace","search_query":null,"namespace_hint":"Черновики","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
@@ -366,6 +397,7 @@ class LLMIntentClassifier:
         *,
         has_file: bool = False,
         has_url: bool = False,
+        has_history_url: bool = False,
         history: Optional[List[dict]] = None,
         active_file_context: Optional[str] = None,
         history_limit: Optional[int] = None,
@@ -374,8 +406,8 @@ class LLMIntentClassifier:
         """
         Разбирает запрос пользователя.
 
-        has_file / has_url передаются как контекст в промпт,
-        чтобы LLM правильно различал save_file vs summarize.
+        has_file / has_url — контекст текущего сообщения.
+        has_history_url — в истории есть URL, но в текущем сообщении его нет.
         history — последние сообщения чата, позволяют разрешить
         местоимения ("это пособие", "скинь его") через контекст диалога.
         active_file_context — строка вида "filename.pdf (пространство: Inbox)",
@@ -392,6 +424,11 @@ class LLMIntentClassifier:
             context_parts.append("К сообщению прикреплён файл.")
         if has_url:
             context_parts.append("В сообщении есть ссылка.")
+        if has_history_url and not has_url:
+            context_parts.append(
+                "В истории диалога есть ссылка, но в текущем сообщении ссылки нет — "
+                "не нужно делать index_url; используй summarize, rag_query или другой подходящий интент."
+            )
         context = " ".join(context_parts)
 
         # Формируем блок с историей для разрешения местоимённых ссылок

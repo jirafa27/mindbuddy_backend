@@ -79,6 +79,10 @@ class AskState(TypedDict, total=False):
     # Суммаризация
     summary_result: Optional[dict[str, Any]]  # file_id, summary, title, source_url
 
+    # Отчёт о выполнении pipeline/multi_action шагов для MindBuddyAgent
+    # Каждый элемент: {"step": str, "ok": bool, "message": str}
+    pipeline_report: Optional[List[dict[str, Any]]]
+
     # Параметры для CRUD-операций (create_namespace, create_file, edit_file и т.д.)
     entity_name: Optional[str]         # имя пространства или заголовок файла
     entity_description: Optional[str]  # описание пространства

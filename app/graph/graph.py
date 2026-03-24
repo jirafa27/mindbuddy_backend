@@ -143,8 +143,24 @@ def build_ask_graph(
         llm_service=llm_service,
         storage=file_service.storage if file_service else None,
         task_publisher=task_publisher,
+        content_extractor=content_extractor,
     )
-    multi_action_node = MultiActionNode(crud_node=crud_node)
+
+    summary_node = SummaryNode()
+
+    index_url_node: Optional[IndexUrlNode] = None
+    if content_extractor and task_publisher:
+        index_url_node = IndexUrlNode(
+            content_extractor=content_extractor,
+            file_service=file_service,
+            task_publisher=task_publisher,
+        )
+
+    multi_action_node = MultiActionNode(
+        crud_node=crud_node,
+        index_url_node=index_url_node,
+        summary_node=summary_node,
+    )
     file_agent = FileAgent(
         file_reader_factory=file_reader_factory,
         text_chunker=text_chunker,
@@ -172,16 +188,9 @@ def build_ask_graph(
     graph.add_node("mind_buddy_agent", mind_buddy_agent.run)
     graph.add_node("send_file_node", send_file_node.run)
 
-    # Опциональные ноды для суммаризации и индексации URL
-    summary_node = SummaryNode()
     graph.add_node("summary_node", summary_node.run)
 
     if content_extractor and task_publisher:
-        index_url_node = IndexUrlNode(
-            content_extractor=content_extractor,
-            file_service=file_service,
-            task_publisher=task_publisher,
-        )
         graph.add_node("index_url_node", index_url_node.run)
 
     # Рёбра графа
@@ -218,7 +227,7 @@ def build_ask_graph(
     })
     graph.add_edge("mind_buddy_agent", END)
     graph.add_edge("crud_node", END)
-    graph.add_edge("multi_action_node", END)
+    graph.add_edge("multi_action_node", "mind_buddy_agent")
 
     # Суммаризация, индексация, отправка файла -> END
     graph.add_edge("summary_node", END)

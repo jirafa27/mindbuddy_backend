@@ -25,12 +25,15 @@ from app.core.exceptions import NotFoundError, ForbiddenError, ValidationError
 from app.domain.protocols import LLMProvider, FileStorage, TaskPublisher
 from app.services.file_service import FileService
 from app.services.namespace_service import NamespaceService
+from app.services.content_extractor import ContentExtractorService
 
 logger = logging.getLogger(__name__)
 
 
 class CrudNode:
     """Выполняет CRUD-операции над пространствами и файлами."""
+
+    _URL_RE = re.compile(r'^https?://', re.IGNORECASE)
 
     def __init__(
         self,
@@ -40,12 +43,14 @@ class CrudNode:
         llm_service: Optional[LLMProvider] = None,
         storage: Optional[FileStorage] = None,
         task_publisher: Optional[TaskPublisher] = None,
+        content_extractor: Optional[ContentExtractorService] = None,
     ) -> None:
         self.file_service = file_service
         self.namespace_service = namespace_service
         self.llm_service = llm_service
         self.storage = storage
         self.task_publisher = task_publisher
+        self.content_extractor = content_extractor
 
     async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
         intent = state.get("intent")
@@ -253,6 +258,40 @@ class CrudNode:
         content = state.get("entity_content")
         title = state.get("entity_name")
         namespace_id = state.get("namespace_id")
+
+        # Если content — это URL, загружаем содержимое страницы
+        url_to_fetch: Optional[str] = None
+        if content and self._URL_RE.match(content.strip()):
+            url_to_fetch = content.strip()
+        elif not content:
+            question = state.get("question") or ""
+            detected = state.get("detected_url")
+            candidate = detected or (question.strip() if self._URL_RE.match(question.strip()) else None)
+            if candidate:
+                url_to_fetch = candidate
+
+        if url_to_fetch:
+            if not self.content_extractor:
+                return {
+                    "answer": "Не могу загрузить страницу: сервис извлечения контента недоступен.",
+                    "agent_steps": agent_steps,
+                }
+            try:
+                logger.info("[CrudNode] create_file: fetching URL %s", url_to_fetch)
+                parsed = await self.content_extractor.extract(url_to_fetch)
+                content = parsed.text
+                if not title:
+                    title = parsed.title
+                logger.info(
+                    "[CrudNode] create_file: fetched URL %s → title=%s len=%d",
+                    url_to_fetch, parsed.title, len(content or ""),
+                )
+            except Exception as exc:
+                logger.warning("[CrudNode] create_file: failed to fetch URL %s: %s", url_to_fetch, exc)
+                return {
+                    "answer": f"Не удалось загрузить страницу: {exc}",
+                    "agent_steps": agent_steps,
+                }
 
         if not content:
             return {

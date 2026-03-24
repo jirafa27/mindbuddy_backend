@@ -133,6 +133,7 @@ class SummaryService:
         filename: str,
         user_id: int,
         content_type: Optional[str] = None,
+        namespace_id: Optional[int] = None,
     ) -> Union[SummaryResponse, ContentToSummarize]:
         """
         Получить контент для суммаризации из загруженного файла.
@@ -175,6 +176,7 @@ class SummaryService:
             file_content=file_content,
             filename=filename,
             content_hash=content_hash,
+            namespace_id=namespace_id,
         )
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
         return ContentToSummarize(

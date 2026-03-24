@@ -67,6 +67,11 @@ class MindBuddyAgent:
         agent_steps = list(state.get("agent_steps") or [])
         file_save_notice = state.get("file_save_notice") or ""
 
+        # Pipeline-отчёт от MultiActionNode — формируем связный ответ через LLM
+        pipeline_report = state.get("pipeline_report")
+        if pipeline_report:
+            return await self._summarize_pipeline(pipeline_report, question, agent_steps)
+
         # Если ответ уже сформирован ранее (например, RouterNode) — просто возвращаем его
         existing_answer = state.get("answer")
         if existing_answer and not search_result:
@@ -150,4 +155,87 @@ class MindBuddyAgent:
                 "answer": (f"{file_save_notice}\n\n{fallback}" if file_save_notice else fallback),
                 "sources": sources,
                 "agent_steps": agent_steps + ["MindBuddyAgent"],
+            }
+
+    async def _summarize_pipeline(
+        self,
+        pipeline_report: list,
+        question: str,
+        agent_steps: list,
+    ) -> dict[str, Any]:
+        """Формирует связный ответ на основе отчёта о выполненных шагах pipeline."""
+        _STEP_NAMES = {
+            "index_url": "Загрузка и сохранение контента",
+            "summarize": "Суммаризация",
+            "create_file": "Сохранение файла",
+            "create_namespace": "Создание пространства",
+            "delete_file": "Удаление файла",
+            "delete_namespace": "Удаление пространства",
+            "edit_file": "Редактирование файла",
+            "edit_namespace": "Редактирование пространства",
+            "move_file": "Перемещение файла",
+        }
+
+        steps_block = "\n".join(
+            f"- {_STEP_NAMES.get(r['step'], r['step'])}: {'✓ ' + r['message'] if r['ok'] else '✗ ' + r['message']}"
+            for r in pipeline_report
+        )
+        errors = [r for r in pipeline_report if not r["ok"]]
+
+        # Если pipeline заканчивается на summarize (без последующего create_file),
+        # то пользователь хотел увидеть сам текст саммари — возвращаем его напрямую.
+        step_names = [r["step"] for r in pipeline_report]
+        last_step = pipeline_report[-1] if pipeline_report else None
+        has_summarize_terminal = (
+            last_step is not None
+            and last_step["step"] == "summarize"
+            and last_step["ok"]
+            and last_step["message"]
+            and "create_file" not in step_names
+        )
+        if has_summarize_terminal and not errors:
+            return {
+                "answer": last_step["message"],
+                "sources": [],
+                "agent_steps": agent_steps + ["MindBuddyAgent (pipeline summary→direct)"],
+            }
+
+        system_msg = {
+            "role": "system",
+            "text": (
+                "Ты ассистент. Пользователь попросил выполнить задачу, и система выполнила цепочку действий. "
+                "Кратко и по-человечески сообщи пользователю о результате: что было сделано и что пошло не так (если были ошибки). "
+                "Не перечисляй технические детали. Не придумывай. Отвечай на русском."
+            ),
+        }
+        user_msg = {
+            "role": "user",
+            "text": (
+                f"Запрос пользователя: {question}\n\n"
+                f"Что было выполнено:\n{steps_block}\n\n"
+                + ("Были ошибки — обязательно упомяни их." if errors else "Всё выполнено успешно.")
+            ),
+        }
+        try:
+            answer = await self.llm_service.complete(
+                [system_msg, user_msg], temperature=0.3, max_tokens=512
+            )
+            return {
+                "answer": answer.strip(),
+                "sources": [],
+                "agent_steps": agent_steps + ["MindBuddyAgent (pipeline summary)"],
+            }
+        except LLMCompletionError:
+            # Fallback: детерминированный ответ без LLM
+            ok_steps = [_STEP_NAMES.get(r["step"], r["step"]) for r in pipeline_report if r["ok"]]
+            err_steps = [f"{_STEP_NAMES.get(r['step'], r['step'])}: {r['message']}" for r in pipeline_report if not r["ok"]]
+            parts = []
+            if ok_steps:
+                parts.append("Выполнено: " + ", ".join(ok_steps) + ".")
+            if err_steps:
+                parts.append("Ошибки: " + "; ".join(err_steps) + ".")
+            return {
+                "answer": " ".join(parts) or "Операции выполнены.",
+                "sources": [],
+                "agent_steps": agent_steps + ["MindBuddyAgent (pipeline fallback)"],
             }
