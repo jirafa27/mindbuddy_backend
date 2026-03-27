@@ -12,17 +12,80 @@ Pipeline-действия передают данные следующим ша�
 Результат передаётся в state["pipeline_report"] для последующей обработки MindBuddyAgent.
 """
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from langchain_core.runnables import RunnableConfig
 
 from app.graph.state import AskState
 from app.graph.nodes.crud_node import CrudNode
+from app.graph.nodes.generate_content_node import GenerateContentNode
+from app.graph.nodes.file_agent import FileAgent
+from app.graph.nodes.save_file_node import SaveFileNode
 
 logger = logging.getLogger(__name__)
 
 # Интенты, которые маршрутизируются через pipeline (не CrudNode)
-_PIPELINE_INTENTS = {"index_url", "summarize"}
+_PIPELINE_INTENTS = {"index_url", "summarize", "save_file"}
+
+
+def _expand_summarize_create_file(
+    actions: List[dict], search_file_ids: List[int]
+) -> List[dict]:
+    """
+    Обрабатывает пары summarize → create_file когда в state несколько file_ids.
+
+    Два сценария:
+    - LLM сгенерировал 1 пару → разворачиваем в N пар с _target_file_id
+    - LLM уже сгенерировал N пар (знал о нескольких файлах) → только назначаем
+      _target_file_id каждому summarize по порядку, без дублирования
+
+    Пример (1 пара): [create_ns, summarize, create_file] + file_ids=[1,2,3]
+    →  [create_ns, summarize(fid=1), create_file,
+                   summarize(fid=2), create_file,
+                   summarize(fid=3), create_file]
+
+    Пример (N пар): [create_ns, summarize, create_file, summarize, create_file, summarize, create_file]
+    → просто назначаем fid=1,2,3 соответствующим summarize шагам
+    """
+    if len(search_file_ids) <= 1:
+        return actions
+
+    summarize_count = sum(1 for a in actions if a.get("intent") == "summarize")
+
+    if summarize_count > 1:
+        # LLM уже раскрыл план — назначаем file_ids по порядку
+        fid_iter = iter(search_file_ids)
+        result = []
+        for act in actions:
+            if act.get("intent") == "summarize":
+                fid = next(fid_iter, None)
+                if fid is not None:
+                    act = {**act, "_target_file_id": fid}
+            result.append(act)
+        return result
+
+    # Ищем первую и единственную пару summarize → create_file
+    summarize_idx = None
+    for i, act in enumerate(actions):
+        if act.get("intent") == "summarize":
+            if i + 1 < len(actions) and actions[i + 1].get("intent") == "create_file":
+                summarize_idx = i
+                break
+
+    if summarize_idx is None:
+        return actions
+
+    summarize_action = actions[summarize_idx]
+    create_file_action = actions[summarize_idx + 1]
+    before = actions[:summarize_idx]
+    after = actions[summarize_idx + 2:]
+
+    expanded = []
+    for fid in search_file_ids:
+        expanded.append({**summarize_action, "_target_file_id": fid})
+        expanded.append(dict(create_file_action))
+
+    return before + expanded + after
 
 
 class MultiActionNode:
@@ -38,12 +101,18 @@ class MultiActionNode:
     def __init__(
         self,
         crud_node: CrudNode,
-        index_url_node=None,   # Optional[IndexUrlNode]
-        summary_node=None,     # Optional[SummaryNode]
+        index_url_node=None,             # Optional[IndexUrlNode]
+        summary_node=None,               # Optional[SummaryNode]
+        generate_content_node=None,      # Optional[GenerateContentNode]
+        file_agent: Optional[FileAgent] = None,
+        save_file_node: Optional[SaveFileNode] = None,
     ) -> None:
         self.crud_node = crud_node
         self.index_url_node = index_url_node
         self.summary_node = summary_node
+        self.generate_content_node: Optional[GenerateContentNode] = generate_content_node
+        self.file_agent = file_agent
+        self.save_file_node = save_file_node
 
     async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
         actions = state.get("pending_actions") or []
@@ -52,6 +121,10 @@ class MultiActionNode:
                 "pipeline_report": [{"step": "multi_action", "ok": False, "message": "Не указаны действия для выполнения."}],
                 "agent_steps": list(state.get("agent_steps") or []),
             }
+
+        # Разворачиваем summarize → create_file пары если несколько файлов
+        search_file_ids: List[int] = state.get("search_file_ids") or []
+        actions = _expand_summarize_create_file(actions, search_file_ids)
 
         all_steps = list(state.get("agent_steps") or [])
         total = len(actions)
@@ -101,11 +174,17 @@ class MultiActionNode:
                 if intent == "index_url":
                     result = await self._run_index_url(sub_state, config, pipeline_context)
                 elif intent == "summarize":
-                    result = await self._run_summarize(sub_state, config, pipeline_context)
+                    result = await self._run_summarize(sub_state, config, pipeline_context, action)
+                elif intent == "save_file":
+                    result = await self._run_save_file(sub_state, config)
                 else:
                     result = await self._run_crud(sub_state, config, pipeline_context, action)
 
                 all_steps = result.get("agent_steps", all_steps)
+
+                # Собираем file_id от save_file шагов — для записи в историю сообщения
+                if intent == "save_file" and result.get("file_id") is not None:
+                    pipeline_context.setdefault("saved_file_ids", []).append(result["file_id"])
 
                 # Delete-действия возвращают pending_action — собираем в батч
                 pa = result.get("pending_action")
@@ -137,6 +216,18 @@ class MultiActionNode:
             "pipeline_report": pipeline_report,
             "agent_steps": all_steps + [f"[MultiActionNode] Completed {total} actions"],
         }
+
+        # Если в батче было создано новое пространство — пробрасываем ID наружу
+        # (chat_service использует его для маршрутизации дополнительных файлов)
+        if created_ns:
+            last_ns_name = list(created_ns.keys())[-1]
+            output["created_namespace_id"] = created_ns[last_ns_name]
+            output["created_namespace_name"] = last_ns_name
+
+        # Пробрасываем file_ids от save_file шагов для записи в историю сообщения
+        saved_file_ids = pipeline_context.get("saved_file_ids") or []
+        if saved_file_ids:
+            output["file_ids"] = saved_file_ids
 
         # Pending-действия от delete-операций — передаём для подтверждения
         if len(pending_deletes) == 1:
@@ -174,6 +265,7 @@ class MultiActionNode:
         sub_state: AskState,
         config: RunnableConfig,
         pipeline_context: dict,
+        action: dict = None,
     ) -> dict[str, Any]:
         """Шаг 2 pipeline: суммаризовать файл из контекста, записать summary_text."""
         if not self.summary_node:
@@ -181,14 +273,83 @@ class MultiActionNode:
                 "answer": "Суммаризация недоступна.",
                 "agent_steps": sub_state.get("agent_steps", []),
             }
-        # Передаём file_id от предыдущего шага, убираем URL чтобы не перечитывать страницу
-        if "history_file_id" in pipeline_context:
+
+        # _target_file_id — конкретный файл из expanded плана (несколько файлов)
+        target_fid = (action or {}).get("_target_file_id")
+        action_ns_hint = (action or {}).get("namespace_name_hint") if action else None
+        if target_fid is not None:
+            sub_state = {
+                **sub_state,
+                "history_file_id": target_fid,
+                "search_file_ids": [target_fid],
+                "detected_url": None,
+                "file_content": None,
+            }
+            pipeline_context.pop("entity_content", None)
+            pipeline_context.pop("entity_name_fallback", None)
+        elif "history_file_id" in pipeline_context:
             sub_state = {
                 **sub_state,
                 "history_file_id": pipeline_context["history_file_id"],
                 "detected_url": None,
                 "file_content": None,
             }
+        elif (
+            action_ns_hint
+            and not sub_state.get("file_content")
+            and not sub_state.get("detected_url")
+        ):
+            # Явный namespace в шаге плана → суммаризируем файлы пространства,
+            # игнорируем history_file_id из роутера (пользователь спросил о пространстве)
+            ns_id = sub_state.get("namespace_id")
+            db = (config or {}).get("configurable", {}).get("async_db")
+            if db and ns_id:
+                from sqlalchemy import select
+                from app.infrastructure.db.models import UserFile
+                q_result = await db.execute(
+                    select(UserFile.id).where(UserFile.namespace_id == ns_id)
+                )
+                ns_file_ids = [row[0] for row in q_result.fetchall()]
+                if ns_file_ids:
+                    logger.info(
+                        "[MultiActionNode] summarize: expanding to %d files in namespace_id=%d (explicit ns hint)",
+                        len(ns_file_ids), ns_id,
+                    )
+                    sub_state = {
+                        **sub_state,
+                        "search_file_ids": ns_file_ids,
+                        "history_file_id": None,
+                        "detected_url": None,
+                        "file_content": None,
+                    }
+        elif (
+            not sub_state.get("history_file_id")
+            and not sub_state.get("file_content")
+            and not sub_state.get("detected_url")
+            and sub_state.get("namespace_id")
+        ):
+            # Нет конкретного файла — суммаризируем все файлы пространства
+            ns_id = sub_state["namespace_id"]
+            db = (config or {}).get("configurable", {}).get("async_db")
+            if db:
+                from sqlalchemy import select
+                from app.infrastructure.db.models import UserFile
+                q_result = await db.execute(
+                    select(UserFile.id).where(UserFile.namespace_id == ns_id)
+                )
+                ns_file_ids = [row[0] for row in q_result.fetchall()]
+                if ns_file_ids:
+                    logger.info(
+                        "[MultiActionNode] summarize: expanding to %d files in namespace_id=%d",
+                        len(ns_file_ids), ns_id,
+                    )
+                    sub_state = {
+                        **sub_state,
+                        "search_file_ids": ns_file_ids,
+                        "detected_url": None,
+                        "file_content": None,
+                    }
+
         result = await self.summary_node.run(sub_state, config)
         summary_result = result.get("summary_result") or {}
         if summary_result.get("summary"):
@@ -199,7 +360,36 @@ class MultiActionNode:
                 len(summary_result["summary"]),
                 summary_result.get("title"),
             )
+        elif result.get("answer") and not result.get("answer", "").startswith("Не нашёл"):
+            # Multi-file summarization — нет summary_result, но есть combined answer
+            pipeline_context["entity_content"] = result["answer"]
+            logger.info(
+                "[MultiActionNode] summarize: captured multi-file answer len=%d",
+                len(result["answer"]),
+            )
         return result
+
+    async def _run_save_file(
+        self,
+        sub_state: AskState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
+        """Шаг pipeline: FileAgent (парсинг/дедупликация) → SaveFileNode (сохранение в БД)."""
+        if not self.file_agent or not self.save_file_node:
+            return {
+                "answer": "Сохранение файла недоступно (сервис не настроен).",
+                "agent_steps": sub_state.get("agent_steps", []),
+            }
+        file_result = await self.file_agent.run(sub_state, config)
+        merged_state: AskState = {**sub_state, **file_result}
+        save_result = await self.save_file_node.run(merged_state, config)
+        combined = {**file_result, **save_result}
+        logger.info(
+            "[MultiActionNode] save_file: file_id=%s answer=%s",
+            combined.get("file_id"),
+            (combined.get("answer") or "")[:80],
+        )
+        return combined
 
     async def _run_crud(
         self,
@@ -226,6 +416,13 @@ class MultiActionNode:
                     "[MultiActionNode] create_file: injected entity_name=%r from pipeline",
                     entity_name,
                 )
+
+            # Если контент всё ещё отсутствует — генерируем через GenerateContentNode
+            if not entity_content and self.generate_content_node:
+                logger.info("[MultiActionNode] create_file: no content, delegating to GenerateContentNode")
+                gen_state = {**sub_state, "entity_name": entity_name}
+                gen_result = await self.generate_content_node.run(gen_state, config)
+                entity_content = gen_result.get("entity_content") or entity_content
 
             sub_state = {**sub_state, "entity_content": entity_content, "entity_name": entity_name}
 

@@ -40,7 +40,7 @@ class ExecuteSearchNode:
         query_embedding = state.get("query_embedding")
         search_file_ids = state.get("search_file_ids")
         search_query = state.get("search_query")
-        limit = 10
+        limit = state.get("search_limit") or 10
 
         if user_id is None:
             return {"agent_steps": agent_steps}

@@ -137,6 +137,17 @@ async def upload_file(
 
 
 
+@router.get("/{file_id}", response_model=ResponseMessage[FileInfo])
+async def get_file_info(
+    file_id: int,
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+) -> ResponseMessage[FileInfo]:
+    """Метаданные файла по ID (user_file_id)."""
+    file_info = await file_service.get_file_info(file_id=file_id, user_id=user.id)
+    return ResponseMessage[FileInfo](data=file_info)
+
+
 @router.head("/download/{file_id}")
 async def head_download_file(
     file_id: int,

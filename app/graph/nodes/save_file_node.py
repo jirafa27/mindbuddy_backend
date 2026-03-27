@@ -99,9 +99,10 @@ class SaveFileNode:
                     )
                     if blob_key:
                         await self.blob_storage.delete_blob(blob_key)
+                    ns_label_str = ns_hint or (str(namespace_id) if namespace_id else None)
                     already_msg = (
-                        f"Файл «{filename}» уже есть в пространстве «{ns_hint or namespace_id}»."
-                        if namespace_id else
+                        f"Файл «{filename}» уже есть в пространстве «{ns_label_str}»."
+                        if ns_label_str else
                         f"Файл «{filename}» уже есть в базе знаний."
                     )
                     result: dict = {

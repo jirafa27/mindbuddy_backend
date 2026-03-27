@@ -22,7 +22,8 @@ class IntentType(str, Enum):
     SEND_FILE = "send_file"                   # Найти файл и отправить пользователю ссылку для скачивания
     CREATE_NAMESPACE = "create_namespace"     # Создать пространство знаний
     DELETE_NAMESPACE = "delete_namespace"     # Удалить пространство знаний
-    EDIT_NAMESPACE = "edit_namespace"         # Редактировать название/описание пространства
+    EDIT_NAMESPACE_NAME = "edit_namespace_name"              # Переименовать пространство
+    EDIT_NAMESPACE_DESCRIPTION = "edit_namespace_description"  # Изменить описание пространства
     MOVE_FILE = "move_file"                   # Переместить файл в пространство
     CREATE_FILE = "create_file"               # Создать файл из текста
     DELETE_FILE = "delete_file"               # Удалить файл

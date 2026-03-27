@@ -33,6 +33,7 @@ from app.infrastructure.repositories.vector_embedding_repository import PgVector
 from app.services.text_chunker import TextChunkerService
 from app.infrastructure.llm.ollama_embedding import OllamaEmbeddingService
 from app.infrastructure.llm.ollama_completion import OllamaCompletionService
+from app.infrastructure.llm.openrouter_completion import OpenRouterCompletionService
 from app.services.file_service import FileService
 from app.infrastructure.llm.yandex_iam import YandexIAMService
 from app.services.user_service import UserService
@@ -45,7 +46,6 @@ from app.services.chat_service import ChatService
 from app.services.content_extractor import ContentExtractorService
 from app.services.summary_service import SummaryService
 from app.graph.nodes.summary_agent import SummaryAgent
-from app.services.llm_intent_classifier import LLMIntentClassifier
 from app.infrastructure.workers.celery_app import celery_app
 from app.infrastructure.workers.task_manager import TaskManager
 
@@ -105,15 +105,19 @@ def get_text_chunker_service() -> TextChunkerService:
 
 @lru_cache
 def get_llm_provider() -> LLMProvider:
-    """Провайдер для LLM (completion). Использует локальный Ollama (Qwen)."""
+    """Провайдер для LLM (completion). OpenRouter если ключ задан, иначе Ollama."""
+    if settings.OPENROUTER_API_KEY:
+        return OpenRouterCompletionService()
     return OllamaCompletionService()
 
 
-def get_llm_intent_classifier(
-    llm_service: LLMProvider = Depends(get_llm_provider),
-) -> LLMIntentClassifier:
-    """Провайдер для LLMIntentClassifier. Использует тот же LLM-сервис что и агенты."""
-    return LLMIntentClassifier(llm_service=llm_service)
+@lru_cache
+def get_summary_llm_provider() -> LLMProvider:
+    """Провайдер LLM для суммаризации: меньшая модель с увеличенным таймаутом."""
+    return OllamaCompletionService(
+        model=settings.OLLAMA_SUMMARY_MODEL,
+        timeout=settings.OLLAMA_SUMMARY_TIMEOUT,
+    )
 
 
 @lru_cache
@@ -255,10 +259,10 @@ def get_content_extractor() -> ContentExtractorService:
 
 
 def get_summary_agent(
-    llm_service: LLMProvider = Depends(get_llm_provider),
+    llm_service: LLMProvider = Depends(get_summary_llm_provider),
     text_chunker: TextChunkerService = Depends(get_text_chunker_service),
 ) -> SummaryAgent:
-    """Провайдер для SummaryAgent."""
+    """Провайдер для SummaryAgent. Использует меньшую модель с увеличенным таймаутом."""
     return SummaryAgent(llm_service=llm_service, text_chunker=text_chunker)
 
 
@@ -308,7 +312,6 @@ def get_chat_service(
     file_service: FileService = Depends(get_file_service),
     llm_service: LLMProvider = Depends(get_llm_provider),
     blob_storage: BlobStorage = Depends(get_blob_storage),
-    llm_intent_classifier: LLMIntentClassifier = Depends(get_llm_intent_classifier),
     namespace_service: NamespaceService = Depends(get_namespace_service),
     content_extractor: ContentExtractorService = Depends(get_content_extractor),
     task_publisher: TaskPublisher = Depends(get_task_publisher),
@@ -329,7 +332,6 @@ def get_chat_service(
         file_service=file_service,
         llm_service=llm_service,
         blob_storage=blob_storage,
-        intent_classifier=llm_intent_classifier,
         namespace_service=namespace_service,
         content_extractor=content_extractor,
         task_publisher=task_publisher,

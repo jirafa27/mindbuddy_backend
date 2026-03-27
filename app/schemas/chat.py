@@ -26,4 +26,5 @@ class ChatMessageItem(BaseModel):
     role: str = Field(..., description="user | assistant")
     text: str
     file_ids: List[int] = Field(default_factory=list)
+    namespace_id: Optional[int] = Field(None, description="ID пространства, в контексте которого отправлено сообщение")
     created_at: datetime

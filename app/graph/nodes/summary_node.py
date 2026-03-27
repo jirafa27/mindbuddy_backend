@@ -1,6 +1,7 @@
 """SummaryNode — дирижёр суммаризации: FileService (контент) → SummaryService (кэш) → Agent → SummaryService (сохранение)."""
+import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from langchain_core.runnables import RunnableConfig
 
@@ -48,11 +49,17 @@ class SummaryNode:
         file_content = state.get("file_content")
         detected_url = state.get("detected_url")
         history_file_id = state.get("history_file_id")
+        search_file_ids: List[int] = state.get("search_file_ids") or []
+
         if file_content and state.get("filename"):
             return await self._summarize_file(state, file_service, summary_service, summary_agent, user_id)
         elif detected_url:
             return await self._summarize_url(
                 state, summary_service, summary_agent, user_id
+            )
+        elif len(search_file_ids) > 1:
+            return await self._summarize_multiple_files(
+                state, summary_service, summary_agent, user_id, search_file_ids
             )
         elif history_file_id:
             return await self._summarize_existing_file(state, file_service, summary_service, summary_agent, user_id)
@@ -95,20 +102,78 @@ class SummaryNode:
                 "answer": "Не удалось найти ссылку для суммаризации.",
                 "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: no URL"],
             }
+        namespace_id = state.get("namespace_id")
+        namespace_name_hint = state.get("namespace_name_hint")
         try:
-            content_or_cached = await summary_service.get_content_for_summarization_url(url=detected_url, user_id=user_id)
+            content_or_cached = await summary_service.get_content_for_summarization_url(
+                url=detected_url, user_id=user_id, namespace_id=namespace_id
+            )
             if isinstance(content_or_cached, SummaryResponse):
-                return self._state_from_response(state, content_or_cached, f"Summarized URL: {detected_url}")
+                return self._state_from_response(
+                    state, content_or_cached, f"Summarized URL: {detected_url}",
+                    namespace_name_hint=namespace_name_hint,
+                )
             content = content_or_cached
             summary_result = await summary_agent.summarize(content.text, title=content.title)
             await summary_service.save_summary(content.content_file_id, summary_result)
             result = SummaryService.build_summary_response(content, summary_result)
-            return self._state_from_response(state, result, f"Summarized URL: {detected_url}")
+            return self._state_from_response(
+                state, result, f"Summarized URL: {detected_url}",
+                namespace_name_hint=namespace_name_hint,
+            )
         except ValueError as e:
             return {**state, "answer": f"Ошибка: {e}", "agent_steps": state.get("agent_steps", []) + [f"[SummaryNode] Error: {e}"]}
         except Exception as e:
             logger.exception("[SummaryNode] Unexpected error")
             return {**state, "answer": f"Произошла ошибка при суммаризации: {e}", "agent_steps": state.get("agent_steps", []) + [f"[SummaryNode] Exception: {e}"]}
+
+    async def _summarize_multiple_files(
+        self,
+        state: AskState,
+        summary_service: SummaryService,
+        summary_agent,
+        user_id: int,
+        file_ids: List[int],
+    ) -> AskState:
+        """Суммаризует каждый файл из списка параллельно и объединяет ответы."""
+        logger.info("[SummaryNode] Summarizing %d files: %s", len(file_ids), file_ids)
+
+        async def _do_one(file_id: int) -> Optional[SummaryResponse]:
+            try:
+                content_or_cached = await summary_service.get_content_for_summarization_existing_file(
+                    file_id=file_id, user_id=user_id
+                )
+                if isinstance(content_or_cached, SummaryResponse):
+                    logger.info("[SummaryNode] Cached summary for file_id=%d", file_id)
+                    return content_or_cached
+                content = content_or_cached
+                summary_result = await summary_agent.summarize(content.text, title=content.title)
+                await summary_service.save_summary(content.content_file_id, summary_result)
+                return SummaryService.build_summary_response(content, summary_result)
+            except Exception:
+                logger.exception("[SummaryNode] Failed to summarize file_id=%d", file_id)
+                return None
+
+        results = await asyncio.gather(*[_do_one(fid) for fid in file_ids])
+
+        parts: List[str] = []
+        steps: List[str] = []
+        for fid, res in zip(file_ids, results):
+            if res is None:
+                parts.append(f"**[file_id={fid}]** — не удалось суммаризировать.")
+                steps.append(f"[SummaryNode] Failed: file_id={fid}")
+            else:
+                title = res.title or f"file_id={fid}"
+                cached_mark = " _(💾 кэш)_" if res.is_cached else ""
+                parts.append(f"**{title}**{cached_mark}\n{res.summary}")
+                steps.append(f"[SummaryNode] Done: file_id={fid}, cached={res.is_cached}")
+
+        answer = "\n\n---\n\n".join(parts)
+        return {
+            **state,
+            "answer": answer,
+            "agent_steps": state.get("agent_steps", []) + steps,
+        }
 
     async def _summarize_file(
         self,

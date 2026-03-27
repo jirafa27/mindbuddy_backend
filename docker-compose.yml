@@ -74,11 +74,11 @@ services:
               capabilities: [gpu]
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q 'qwen2.5:7b'"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 60s
+      test: ["CMD-SHELL", "ollama list | grep -q 'qwen2.5:14b'"]
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 900s
 
   backend:
     build:

@@ -13,7 +13,8 @@ IntentType = Literal[
     "send_file",          # Найти файл и отправить пользователю ссылку для скачивания
     "create_namespace",   # Создать пространство знаний
     "delete_namespace",   # Удалить пространство знаний
-    "edit_namespace",     # Редактировать название/описание пространства
+    "edit_namespace_name",        # Переименовать пространство
+    "edit_namespace_description", # Изменить описание пространства
     "move_file",          # Переместить файл в пространство
     "create_file",        # Создать файл из текста
     "delete_file",        # Удалить файл
@@ -51,6 +52,10 @@ class AskState(TypedDict, total=False):
     detected_url: Optional[str]  # URL из вопроса или истории
     history_file_id: Optional[int]  # file_id из истории
 
+    # Флаги контекста URL (выставляются RouterNode, используются PlannerNode)
+    url_in_current_message: Optional[bool]  # URL в текущем сообщении (не из истории)
+    has_history_url: Optional[bool]         # URL найден в истории, но не в текущем сообщении
+
     # Имя пространства, упомянутое в тексте вопроса (напр. "в пространстве Работа")
     namespace_name_hint: Optional[str]
 
@@ -72,6 +77,9 @@ class AskState(TypedDict, total=False):
     # Поисковый запрос, очищенный LLM (без команд, на чистую тему)
     # Используется QueryEmbeddingNode и SendFileNode вместо полного question
     search_query: Optional[str]
+
+    # Максимальное число чанков для векторного поиска (по умолчанию 10 в ExecuteSearchNode)
+    search_limit: Optional[int]
 
     # Режим поиска для SEND_FILE: "by_topic" | "by_name" | "by_content"
     send_file_search_mode: Optional[str]
@@ -99,6 +107,10 @@ class AskState(TypedDict, total=False):
 
     # True, если пространство было создано автоматически в процессе загрузки файла
     namespace_created: Optional[bool]
+
+    # ID и имя пространства, созданного в рамках текущего запроса (MultiActionNode → ChatService)
+    created_namespace_id: Optional[int]
+    created_namespace_name: Optional[str]
 
     # True, если контент файла уже проиндексирован (эмбеддинги уже есть в БД)
     content_already_indexed: Optional[bool]

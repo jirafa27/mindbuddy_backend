@@ -164,6 +164,7 @@ async def get_chat_messages(
             role=m.role.value,
             text=m.text,
             file_ids=m.file_ids,
+            namespace_id=m.namespace_id,
             created_at=m.created_at or datetime.utcnow(),
         )
         for m in messages

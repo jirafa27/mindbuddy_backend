@@ -25,13 +25,19 @@ from app.services.search_service import SearchService
 from app.services.text_chunker import TextChunkerService
 from app.services.content_extractor import ContentExtractorService
 from app.services.summary_service import SummaryService
-from app.services.llm_intent_classifier import LLMIntentClassifier
 from app.utils.file_readers import FileReaderFactory
 
 logger = logging.getLogger(__name__)
 
 # Скользящее окно: сколько последних сообщений чата передавать в LLM
 CHAT_HISTORY_LIMIT = 10
+
+_CONFIRM_WORDS = {"да", "yes"}
+
+
+def _is_confirmation(text: str) -> bool:
+    """True если текст — явное подтверждение («да» / «yes»)."""
+    return text.strip().lower().rstrip("!.,") in _CONFIRM_WORDS
 
 
 def _decline_message(pending: dict) -> str:
@@ -62,7 +68,6 @@ class ChatService:
         file_service: FileService,
         llm_service: LLMProvider,
         blob_storage: BlobStorage,
-        intent_classifier,
         namespace_service: Optional[NamespaceService] = None,
         content_extractor: Optional[ContentExtractorService] = None,
         task_publisher: Optional[TaskPublisher] = None,
@@ -79,7 +84,6 @@ class ChatService:
         self.file_service = file_service
         self.namespace_service = namespace_service
         self.content_extractor = content_extractor
-        self.intent_classifier = intent_classifier
 
         graph = build_ask_graph(
             file_reader_factory=file_reader_factory,
@@ -88,7 +92,6 @@ class ChatService:
             file_service=file_service,
             llm_service=llm_service,
             blob_storage=blob_storage,
-            intent_classifier=intent_classifier,
             namespace_service=namespace_service,
             content_extractor=content_extractor,
             task_publisher=task_publisher,
@@ -140,7 +143,7 @@ class ChatService:
                 # Проверяем pending_action — отложенное удаление ожидает подтверждения
                 pending = await self.chat_repository.get_pending_action(chat_id)
                 if pending:
-                    if LLMIntentClassifier.is_confirmation(question):
+                    if _is_confirmation(question):
                         answer_text = await self._execute_pending_action(
                             pending=pending, user_id=user_id
                         )
@@ -154,10 +157,12 @@ class ChatService:
 
                     await self.chat_repository.clear_pending_action(chat_id)
                     await self.chat_repository.add_message(
-                        chat_id, ChatMessageRole.USER.value, question, file_ids=[]
+                        chat_id, ChatMessageRole.USER.value, question,
+                        file_ids=[], namespace_id=namespace_id,
                     )
                     await self.chat_repository.add_message(
-                        chat_id, ChatMessageRole.ASSISTANT.value, answer_text, file_ids=[]
+                        chat_id, ChatMessageRole.ASSISTANT.value, answer_text,
+                        file_ids=[], namespace_id=namespace_id,
                     )
                     await self.db.commit()
                     return AskResponse(
@@ -213,10 +218,29 @@ class ChatService:
         if not result_file_ids and result.get("file_id") is not None:
             result_file_ids = [result["file_id"]]
 
-        # Обрабатываем файлы 2+ через тот же граф с override save_file
+        # Обрабатываем файлы 2+ через тот же граф.
+        # Если интент — summarize, суммаризируем все файлы; иначе просто сохраняем.
+        # Важно: запускаем последовательно — все sub-запросы используют одну DB-сессию,
+        # параллельный flush приводит к "Session is already flushing".
         if files and len(files) > 1:
-            resolved_ns = result.get("namespace_id") or namespace_id
-            ns_hint = result.get("namespace_name_hint")
+            # Namespace: предпочитаем только что созданный через create_namespace в multi-step плане
+            resolved_ns = (
+                result.get("created_namespace_id")
+                or result.get("namespace_id")
+                or namespace_id
+            )
+            ns_hint = result.get("created_namespace_name") or result.get("namespace_name_hint")
+
+            # Для multi-step планов с парой summarize → create_file
+            # дополнительные файлы тоже суммаризируем (а не просто сохраняем)
+            pending_actions = result.get("pending_actions") or []
+            has_summarize = any(a.get("intent") == "summarize" for a in pending_actions)
+            has_create_file = any(a.get("intent") == "create_file" for a in pending_actions)
+            if has_summarize and has_create_file:
+                extra_override = "summarize"
+            else:
+                extra_override = "summarize" if result_intent == "summarize" else "save_file"
+
             all_answers: List[str] = [answer_text]
             for extra_content, extra_filename in files[1:]:
                 extra_state: AskState = {
@@ -227,7 +251,7 @@ class ChatService:
                     "file_content": extra_content,
                     "filename": extra_filename,
                     "history": [],
-                    "override_intent": "save_file",
+                    "override_intent": extra_override,
                 }
                 extra_result = await self.ask_graph.ainvoke(extra_state, config=config)
                 extra_ans = extra_result.get("answer", "")
@@ -236,19 +260,34 @@ class ChatService:
                 extra_fid = extra_result.get("file_id")
                 if extra_fid is not None:
                     result_file_ids.append(extra_fid)
-            answer_text = "\n".join(all_answers)
+
+            sep = "\n\n---\n\n" if extra_override == "summarize" else "\n"
+            answer_text = sep.join(all_answers)
 
         if self.chat_repository and resolved_chat_id is not None:
-            user_message_file_ids = list(dict.fromkeys((file_ids or []) + result_file_ids))
+            # К сообщению пользователя добавляем только файлы, которые он сам прикрепил.
+            # Файлы, найденные графом (send_file и т.п.), относятся к ответу ассистента.
+            # Если пользователь загружал новые файлы — их IDs тоже сохраняем в его сообщение,
+            # чтобы следующий запрос мог их найти в истории.
+            user_message_file_ids = list(dict.fromkeys(file_ids or []))
+            if bool(files) and result_file_ids:
+                seen = set(user_message_file_ids)
+                for fid in result_file_ids:
+                    if fid not in seen:
+                        user_message_file_ids.append(fid)
+                        seen.add(fid)
             await self.chat_repository.add_message(
                 resolved_chat_id, ChatMessageRole.USER.value, question,
                 file_ids=user_message_file_ids,
+                namespace_id=namespace_id,
             )
             # При сохранении файлов файлы относятся к сообщению пользователя, не ассистента
             assistant_file_ids = [] if is_save_file else result_file_ids
+            resolved_namespace_id = result.get("namespace_id") or namespace_id
             await self.chat_repository.add_message(
                 resolved_chat_id, ChatMessageRole.ASSISTANT.value, answer_text,
                 file_ids=assistant_file_ids,
+                namespace_id=resolved_namespace_id,
             )
 
             # Если CrudNode вернул pending_action — сохраняем его в чате
@@ -312,6 +351,23 @@ class ChatService:
                     return "Ошибка: не указан ID файла."
                 await self.file_service.delete_file(file_id=file_id, user_id=user_id)
                 return f"{target.capitalize()} удалён."
+
+            elif action_type == "delete_all_in_namespace":
+                file_ids = params.get("file_ids") or []
+                if not file_ids:
+                    return "Ошибка: список файлов пуст."
+                deleted, failed = 0, 0
+                for fid in file_ids:
+                    try:
+                        await self.file_service.delete_file(file_id=fid, user_id=user_id)
+                        deleted += 1
+                    except Exception:
+                        logger.warning("[ChatService] Failed to delete file_id=%d", fid)
+                        failed += 1
+                result_msg = f"Удалено {deleted} файл(ов)."
+                if failed:
+                    result_msg += f" Не удалось удалить: {failed}."
+                return result_msg
 
             elif action_type == "batch_delete":
                 items = pending.get("items") or []

@@ -1,5 +1,5 @@
 import httpx
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from app.core.config import settings
 
@@ -9,10 +9,14 @@ class LLMCompletionError(Exception):
 
 
 class OllamaCompletionService:
-    def __init__(self):
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ):
         self.base_url = settings.OLLAMA_BASE_URL
-        self.model = settings.OLLAMA_LLM_MODEL
-        self.timeout = settings.OLLAMA_TIMEOUT
+        self.model = model or settings.OLLAMA_LLM_MODEL
+        self.timeout = timeout if timeout is not None else settings.OLLAMA_TIMEOUT
 
     def _convert_messages(self, messages: List[Dict]) -> List[Dict]:
         """Конвертирует Яндекс-формат {role, text} в OpenAI-формат {role, content}."""

@@ -65,12 +65,16 @@ class CrudNode:
                 return await self._create_namespace(state, user_id, agent_steps)
             elif intent == IntentType.DELETE_NAMESPACE:
                 return await self._request_delete_namespace(state, user_id, agent_steps, config)
-            elif intent == IntentType.EDIT_NAMESPACE:
-                return await self._edit_namespace(state, user_id, agent_steps)
+            elif intent == IntentType.EDIT_NAMESPACE_NAME:
+                return await self._rename_namespace(state, user_id, agent_steps)
+            elif intent == IntentType.EDIT_NAMESPACE_DESCRIPTION:
+                return await self._update_namespace_description(state, user_id, agent_steps)
             elif intent == IntentType.MOVE_FILE:
                 return await self._move_file(state, user_id, agent_steps, config)
             elif intent == IntentType.CREATE_FILE:
                 return await self._create_file(state, user_id, agent_steps, config)
+            elif intent == IntentType.SAVE_SUMMARY:
+                return await self._save_summary_as_file(state, user_id, agent_steps, config)
             elif intent == IntentType.DELETE_FILE:
                 return await self._request_delete_file(state, user_id, agent_steps, config)
             elif intent == IntentType.EDIT_FILE:
@@ -122,7 +126,14 @@ class CrudNode:
         namespace_id = state.get("namespace_id")
         namespace_name = state.get("namespace_name_hint") or state.get("entity_name")
         new_description = state.get("entity_description")
-        new_name = state.get("entity_content")
+        # Новое имя может прийти как entity_name (от Planner) или entity_content (legacy)
+        new_name = state.get("entity_name") or state.get("entity_content")
+
+        # Если LLM передал текущее имя в entity_name (при операции "добавь описание"),
+        # не считаем это переименованием
+        current_name = state.get("namespace_name_hint")
+        if new_name and current_name and new_name.strip().lower() == current_name.strip().lower():
+            new_name = None
 
         if not namespace_id:
             hint = f" «{namespace_name}»" if namespace_name else ""
@@ -151,12 +162,62 @@ class CrudNode:
         if new_name:
             parts.append(f"переименовано в «{namespace.name}»")
         if new_description is not None:
-            parts.append(f"описание обновлено")
+            parts.append("описание обновлено")
         summary = ", ".join(parts)
         return {
             "answer": f"Пространство {summary}.",
             "agent_steps": agent_steps,
         }
+
+    async def _rename_namespace(
+        self, state: AskState, user_id: int, agent_steps: list
+    ) -> dict[str, Any]:
+        """Переименовать пространство (edit_namespace_name)."""
+        namespace_id = state.get("namespace_id")
+        current_name = state.get("namespace_name_hint")
+        new_name = state.get("entity_name") or state.get("entity_content")
+
+        if not namespace_id:
+            hint = f" «{current_name}»" if current_name else ""
+            return {"answer": f"Не нашёл пространство{hint}. Уточните название.", "agent_steps": agent_steps}
+        if not self.namespace_service:
+            return {"answer": "Сервис пространств недоступен.", "agent_steps": agent_steps}
+        if not new_name:
+            return {"answer": "Укажите новое название пространства.", "agent_steps": agent_steps}
+        if new_name.strip().lower() == (current_name or "").strip().lower():
+            return {"answer": f"Пространство уже называется «{current_name}».", "agent_steps": agent_steps}
+
+        namespace = await self.namespace_service.update_namespace(
+            namespace_id=namespace_id,
+            user_id=user_id,
+            name=new_name,
+            description=None,
+        )
+        return {"answer": f"Пространство переименовано в «{namespace.name}».", "agent_steps": agent_steps}
+
+    async def _update_namespace_description(
+        self, state: AskState, user_id: int, agent_steps: list
+    ) -> dict[str, Any]:
+        """Обновить описание пространства (edit_namespace_description)."""
+        namespace_id = state.get("namespace_id")
+        current_name = state.get("namespace_name_hint")
+        new_description = state.get("entity_description") or state.get("entity_content")
+
+        if not namespace_id:
+            hint = f" «{current_name}»" if current_name else ""
+            return {"answer": f"Не нашёл пространство{hint}. Уточните название.", "agent_steps": agent_steps}
+        if not self.namespace_service:
+            return {"answer": "Сервис пространств недоступен.", "agent_steps": agent_steps}
+        if new_description is None:
+            return {"answer": "Укажите новое описание пространства.", "agent_steps": agent_steps}
+
+        await self.namespace_service.update_namespace(
+            namespace_id=namespace_id,
+            user_id=user_id,
+            name=None,
+            description=new_description,
+        )
+        return {"answer": "Описание пространства обновлено.", "agent_steps": agent_steps}
 
     async def _request_delete_namespace(
         self,
@@ -219,7 +280,9 @@ class CrudNode:
         file_id = state.get("history_file_id") or (
             state.get("search_file_ids") or [None]
         )[0]
-        search_query = state.get("search_query") or state.get("entity_name")
+        # search_query — имя конкретного файла (НЕ берём entity_name как fallback,
+        # потому что для bulk-перемещения entity_name = исходное пространство)
+        search_query = state.get("search_query")
 
         if not namespace_id and namespace_name:
             namespace_id = await self._resolve_namespace_id(config, user_id, namespace_name)
@@ -230,6 +293,38 @@ class CrudNode:
                 "answer": f"Не нашёл пространство назначения{hint}. Укажите корректное название.",
                 "agent_steps": agent_steps,
             }
+
+        # Bulk-перемещение: entity_name = исходное пространство, search_query = null
+        source_ns_name = state.get("entity_name") if not search_query else None
+        if not file_id and not search_query and source_ns_name:
+            source_ns_id = await self._resolve_namespace_id(config, user_id, source_ns_name)
+            if not source_ns_id:
+                return {
+                    "answer": f"Не нашёл исходное пространство «{source_ns_name}». Уточните название.",
+                    "agent_steps": agent_steps,
+                }
+            file_ids = await self._find_all_file_ids_in_namespace(config, user_id, source_ns_id)
+            if not file_ids:
+                return {
+                    "answer": f"В пространстве «{source_ns_name}» нет файлов.",
+                    "agent_steps": agent_steps,
+                }
+            moved = []
+            errors = []
+            for fid in file_ids:
+                try:
+                    info = await self.file_service.move_to_namespace(
+                        file_id=fid, namespace_id=namespace_id, user_id=user_id
+                    )
+                    moved.append(info.filename)
+                except Exception as exc:
+                    logger.warning("[CrudNode] Failed to move file_id=%d: %s", fid, exc)
+                    errors.append(str(fid))
+            ns_display = f"«{namespace_name}»" if namespace_name else f"(id={namespace_id})"
+            result_msg = f"Перемещено {len(moved)} файл(ов) из «{source_ns_name}» в {ns_display}."
+            if errors:
+                result_msg += f" Не удалось переместить: {', '.join(errors)}."
+            return {"answer": result_msg, "agent_steps": agent_steps}
 
         if not file_id and search_query:
             file_id = await self._find_file_id_by_name(config, user_id, search_query)
@@ -251,6 +346,38 @@ class CrudNode:
             "answer": f"Файл «{file_info.filename}» перемещён в пространство {ns_display}.",
             "agent_steps": agent_steps,
         }
+
+    async def _save_summary_as_file(
+        self, state: AskState, user_id: int, agent_steps: list, config: RunnableConfig = None
+    ) -> dict[str, Any]:
+        """Сохраняет последнее саммари из истории или pipeline_context как файл."""
+        # 1. Приоритет: entity_content, выставленный multi_action pipeline
+        content = state.get("entity_content")
+        title = state.get("entity_name")
+
+        # 2. Если нет — ищем в истории последнее сообщение ассистента с достаточным текстом
+        if not content:
+            history = state.get("history") or []
+            for msg in reversed(history):
+                if msg.get("role") == "assistant":
+                    text = (msg.get("text") or "").strip()
+                    # Берём первое непустое сообщение ассистента длиннее 100 символов
+                    if len(text) > 100:
+                        content = text
+                        break
+
+        if not content:
+            return {
+                "answer": (
+                    "Не нашёл саммари для сохранения. "
+                    "Сначала попросите «суммаризируй файл», затем — «сохрани это»."
+                ),
+                "agent_steps": agent_steps,
+            }
+
+        # Делегируем в _create_file, подставив content
+        patched_state = {**state, "entity_content": content, "entity_name": title}
+        return await self._create_file(patched_state, user_id, agent_steps, config)
 
     async def _create_file(
         self, state: AskState, user_id: int, agent_steps: list, config: RunnableConfig = None
@@ -300,7 +427,16 @@ class CrudNode:
             }
 
         # Если пространство не указано — пытаемся найти Inbox как дефолтное
+        # Но если пользователь явно указал пространство (namespace_name_hint) и оно не нашлось — сообщаем
         namespace_name = state.get("namespace_name_hint")
+        if namespace_id is None and namespace_name:
+            return {
+                "answer": (
+                    f"Пространство «{namespace_name}» не найдено. "
+                    "Проверьте название или создайте его командой «Создай пространство ...»."
+                ),
+                "agent_steps": agent_steps,
+            }
         if namespace_id is None and config is not None:
             inbox_id = await self._resolve_namespace_id(config, user_id, "Inbox")
             if inbox_id is not None:
@@ -328,11 +464,38 @@ class CrudNode:
         agent_steps: list,
         config: RunnableConfig,
     ) -> dict[str, Any]:
-        """Находит файл, возвращает вопрос подтверждения и сохраняет pending_action."""
+        """Находит файл(ы), возвращает вопрос подтверждения и сохраняет pending_action."""
         file_id = state.get("history_file_id") or (
             state.get("search_file_ids") or [None]
         )[0]
         search_query = state.get("search_query") or state.get("entity_name")
+        namespace_id = state.get("namespace_id")
+        namespace_name = state.get("namespace_name_hint")
+
+        # Случай «удали все файлы из пространства X» — нет конкретного файла, но есть namespace
+        if not file_id and not search_query and namespace_id:
+            all_ids = await self._find_all_file_ids_in_namespace(config, user_id, namespace_id)
+            if not all_ids:
+                ns_label = f"«{namespace_name}»" if namespace_name else f"(id={namespace_id})"
+                return {
+                    "answer": f"В пространстве {ns_label} нет файлов.",
+                    "agent_steps": agent_steps,
+                }
+            ns_label = f"«{namespace_name}»" if namespace_name else f"(id={namespace_id})"
+            count = len(all_ids)
+            pending = {
+                "type": "delete_all_in_namespace",
+                "params": {"namespace_id": namespace_id, "file_ids": all_ids},
+                "target": f"{count} файл(ов) из пространства {ns_label}",
+            }
+            return {
+                "answer": (
+                    f"Вы уверены, что хотите удалить все {count} файл(ов) из пространства {ns_label}? "
+                    "Это действие нельзя отменить. Напишите «да» для подтверждения."
+                ),
+                "pending_action": pending,
+                "agent_steps": agent_steps,
+            }
 
         if not file_id and search_query:
             file_id = await self._find_file_id_by_name(config, user_id, search_query)

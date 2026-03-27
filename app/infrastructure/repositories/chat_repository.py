@@ -29,6 +29,7 @@ class PgChatRepository:
             role=ChatMessageRole(model.role),
             text=model.text,
             file_ids=model.file_ids or [],
+            namespace_id=model.namespace_id,
             created_at=model.created_at,
         )
 
@@ -69,8 +70,15 @@ class PgChatRepository:
         role: str,
         text: str,
         file_ids: Optional[List[int]] = None,
+        namespace_id: Optional[int] = None,
     ) -> ChatMessageEntity:
-        msg = ChatMessage(chat_id=chat_id, role=role, text=text, file_ids=file_ids or [])
+        msg = ChatMessage(
+            chat_id=chat_id,
+            role=role,
+            text=text,
+            file_ids=file_ids or [],
+            namespace_id=namespace_id,
+        )
         self.db.add(msg)
         await self.db.flush()
         return self._to_message_entity(msg)
@@ -89,6 +97,7 @@ class PgChatRepository:
                 ChatMessage.role,
                 ChatMessage.text,
                 ChatMessage.file_ids,
+                ChatMessage.namespace_id,
                 ChatMessage.created_at,
             )
             .join(Chat, ChatMessage.chat_id == Chat.id)
@@ -106,6 +115,7 @@ class PgChatRepository:
                 role=ChatMessageRole(r.role),
                 text=r.text,
                 file_ids=r.file_ids or [],
+                namespace_id=r.namespace_id,
                 created_at=r.created_at,
             )
             for r in rows

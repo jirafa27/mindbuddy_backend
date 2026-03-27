@@ -34,6 +34,17 @@ WHERE uf.user_id = :user_id
   AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id = :namespace_id)
 """
 
+_LIST_ALL_IN_NAMESPACE_SQL = """
+SELECT uf.id AS file_id,
+       COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename
+FROM user_files uf
+JOIN files f ON f.id = uf.file_id
+WHERE uf.user_id = :user_id
+  AND uf.namespace_id = :namespace_id
+ORDER BY uf.created_at DESC
+LIMIT :limit
+"""
+
 _FILENAME_EXPR = (
     "LOWER(COALESCE(uf.custom_title, f.media_metadata->>'title',"
     " f.source_url, f.file_path, ''))"
@@ -237,6 +248,8 @@ class SendFileNode:
             rows = await self._search_by_name(db, user_id, namespace_id, search_term)
         elif mode == "by_content":
             rows = await self._search_by_content(db, user_id, namespace_id, search_term)
+        elif mode == "all_in_namespace":
+            rows = await self._list_all_in_namespace(db, user_id, namespace_id)
         else:
             rows = await self._search_by_topic(db, user_id, namespace_id, search_term)
 
@@ -263,6 +276,25 @@ class SendFileNode:
             "sources": sources,
             "agent_steps": agent_steps,
         }
+
+    async def _list_all_in_namespace(
+        self, db, user_id, namespace_id
+    ) -> List[dict]:
+        """Возвращает все файлы пользователя в указанном пространстве."""
+        if not namespace_id:
+            logger.warning("[SendFileNode] _list_all_in_namespace: namespace_id is None")
+            return []
+        try:
+            result = await db.execute(
+                text(_LIST_ALL_IN_NAMESPACE_SQL),
+                {"user_id": user_id, "namespace_id": namespace_id, "limit": SEND_FILE_LIMIT},
+            )
+            rows = [dict(r) for r in result.mappings().all()]
+            logger.info("[SendFileNode] all_in_namespace: found %d file(s)", len(rows))
+            return rows
+        except Exception as exc:
+            logger.error("[SendFileNode] DB error (all_in_namespace): %s", exc)
+            return []
 
     async def _search_by_name(
         self, db, user_id, namespace_id, search_term: str
@@ -299,7 +331,7 @@ class SendFileNode:
     ) -> List[dict]:
         """
         Семантический поиск файлов по теме/содержанию.
-        При неудаче — fallback на ILIKE-поиск по имени.
+        При неудаче vector+rerank — fallback только если embedding недоступен.
         """
         logger.info("[SendFileNode] Topic search: term=%r", search_term)
 
@@ -310,8 +342,11 @@ class SendFileNode:
             if rows:
                 logger.info("[SendFileNode] Topic (vector+LLM) found %d file(s)", len(rows))
                 return rows
-            logger.info("[SendFileNode] Vector search found nothing, falling back to name search")
+            logger.info("[SendFileNode] Vector topic search: no match found")
+            return []
 
+        # Embedding недоступен — fallback на ILIKE-поиск по имени
+        logger.info("[SendFileNode] Embedding unavailable, falling back to name search")
         sql, extra_params = _build_stem_search_sql(search_term)
         base_params = {"user_id": user_id, "namespace_id": namespace_id, "limit": SEND_FILE_LIMIT}
         try:

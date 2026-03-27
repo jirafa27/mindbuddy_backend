@@ -194,6 +194,9 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)  # user | assistant
     text: Mapped[str] = mapped_column(Text, nullable=False)
     file_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    namespace_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("namespaces.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )

@@ -63,4 +63,5 @@ class HistoryMessage(BaseModel):
     role: str = Field(..., description="Роль: 'user' или 'assistant'")
     text: str = Field(..., description="Текст сообщения")
     file_ids: List[int] = Field(default_factory=list, description="ID файлов, приложенных к сообщению")
+    namespace_id: Optional[int] = Field(None, description="ID пространства сообщения")
 

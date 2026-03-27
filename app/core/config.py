@@ -43,10 +43,18 @@ class Settings(BaseSettings):
 
     # Ollama (локальный LLM + эмбеддинги)
     OLLAMA_BASE_URL: str = "http://ollama:11434"
-    OLLAMA_LLM_MODEL: str = "qwen2.5:7b"
+    OLLAMA_LLM_MODEL: str = "qwen2.5:14b"
     OLLAMA_EMBED_MODEL: str = "qwen2.5:7b"
     OLLAMA_EMBED_DIM: int = 3584
-    OLLAMA_TIMEOUT: float = 120.0
+    OLLAMA_TIMEOUT: float = 300.0
+    # Отдельная модель и таймаут для суммаризации (меньше/быстрее)
+    OLLAMA_SUMMARY_MODEL: str = "qwen2.5:7b"
+    OLLAMA_SUMMARY_TIMEOUT: float = 300.0
+
+    # OpenRouter (внешний LLM API, OpenAI-совместимый)
+    OPENROUTER_API_KEY: Optional[str] = None
+    OPENROUTER_LLM_MODEL: str = "openai/gpt-4o-mini"
+    OPENROUTER_TIMEOUT: float = 60.0
 
     # Text Chunking
     CHUNK_SIZE: int = 512  # tokens

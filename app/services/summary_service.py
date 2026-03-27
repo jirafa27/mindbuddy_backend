@@ -43,6 +43,7 @@ class SummaryService:
         self,
         url: str,
         user_id: int,
+        namespace_id: Optional[int] = None,
     ) -> Union[SummaryResponse, ContentToSummarize]:
         """
         Получить контент для суммаризации по URL.
@@ -110,6 +111,7 @@ class SummaryService:
             source_url=url,
             content_hash=parsed.content_hash,
             content_type=parsed.content_type,
+            namespace_id=namespace_id,
         )
         return ContentToSummarize(
             text=parsed.text,

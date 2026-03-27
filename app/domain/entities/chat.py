@@ -13,6 +13,7 @@ class ChatMessageEntity:
     role: ChatMessageRole
     text: str
     file_ids: List[int] = field(default_factory=list)
+    namespace_id: Optional[int] = None
     created_at: Optional[datetime] = None
 
 
