@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,17 @@ class PgUserFileRepository:
         if row is None:
             return None
         return self._to_entity(row)
+
+    async def list_ids_by_user_and_namespace(
+        self, user_id: int, namespace_id: int
+    ) -> Sequence[int]:
+        """user_files.id пользователя в пространстве, по возрастанию created_at."""
+        result = await self.db.execute(
+            select(UserFile.id)
+            .where(UserFile.user_id == user_id, UserFile.namespace_id == namespace_id)
+            .order_by(UserFile.created_at.asc())
+        )
+        return [row[0] for row in result.fetchall()]
 
     async def find_by_user_and_file(
         self, user_id: int, file_id: int, namespace_id: Optional[int] = None
@@ -113,5 +124,15 @@ class PgUserFileRepository:
         if row is None:
             return None
         row.file_id = new_file_id
+        await self.db.flush()
+        return self._to_entity(row)
+
+    async def update_custom_title(self, user_file_id: int, new_title: str) -> Optional[UserFileEntity]:
+        """Обновляет отображаемое имя файла (custom_title)."""
+        result = await self.db.execute(select(UserFile).where(UserFile.id == user_file_id))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        row.custom_title = new_title
         await self.db.flush()
         return self._to_entity(row)

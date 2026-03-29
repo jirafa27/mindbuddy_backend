@@ -1,22 +1,15 @@
-"""RouterNode — определяет намерение пользователя (fast paths) и передаёт остальное PlannerNode."""
-import re
+"""RouterNode — определяет намерение пользователя (fast paths) и передаёт остальное IntentNode."""
 import logging
 from typing import Optional, List, Dict
 
 from langchain_core.runnables import RunnableConfig
-from sqlalchemy import text
 
 from app.graph.state import AskState
 from app.core.enums import IntentType
+from app.utils.url import extract_first_http_url, is_http_url_only
+from app.graph.utils.namespace import resolve_namespace_id
 
 logger = logging.getLogger(__name__)
-
-# Паттерн для распознавания URL (детерминированный — LLM здесь не нужен)
-URL_PATTERN = re.compile(
-    r'https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b'
-    r'[-a-zA-Z0-9()@:%_\+.~#?&//=]*',
-    re.IGNORECASE,
-)
 
 # Количество сообщений в истории для поиска контекста
 HISTORY_SCAN_LIMIT = 5
@@ -25,23 +18,19 @@ HISTORY_SCAN_LIMIT = 5
 class RouterNode:
     """
     Тонкий маршрутизатор: обрабатывает детерминированные fast-paths
-    и передаёт всё остальное в PlannerNode.
+    и передаёт всё остальное в IntentNode → ActionResolverNode.
 
     Fast paths:
     - override_intent задан → прямой узел
     - URL без текста → index_url
     - файл без вопроса → save_file
 
-    Всё остальное → PlannerNode (intent не задан, url_in_current_message / has_history_url выставлены).
+    Всё остальное → IntentNode (intent не задан, url_in_current_message / has_history_url выставлены).
     """
-
-    def _extract_url(self, text: str) -> Optional[str]:
-        match = URL_PATTERN.search(text)
-        return match.group(0) if match else None
 
     def _extract_url_from_history(self, history: List[Dict]) -> Optional[str]:
         for msg in reversed(history[-HISTORY_SCAN_LIMIT:]):
-            url = self._extract_url(msg.get("text", ""))
+            url = extract_first_http_url(msg.get("text", "") or "")
             if url:
                 logger.info("[Router] Found URL in history: %s", url)
                 return url
@@ -64,27 +53,10 @@ class RouterNode:
                 return list(file_ids)
         return []
 
-    def _is_url_only(self, text: str) -> bool:
-        return bool(URL_PATTERN.fullmatch(text.strip()))
-
     async def _resolve_namespace_id(
         self, db, user_id: int, name: str
     ) -> Optional[int]:
-        """Ищет namespace по имени (case-insensitive) для данного пользователя."""
-        try:
-            result = await db.execute(
-                text(
-                    "SELECT id FROM namespaces "
-                    "WHERE user_id = :user_id AND LOWER(name) = LOWER(:name) "
-                    "LIMIT 1"
-                ),
-                {"user_id": user_id, "name": name},
-            )
-            row = result.mappings().first()
-            return row["id"] if row else None
-        except Exception as exc:
-            logger.warning("[Router] Failed to resolve namespace '%s': %s", name, exc)
-            return None
+        return await resolve_namespace_id(db, user_id, name)
 
     async def _inbox_namespace_if_unset(
         self,
@@ -127,7 +99,7 @@ class RouterNode:
         override_intent = state.get("override_intent")
         user_id = state.get("user_id")
 
-        detected_url = self._extract_url(question)
+        detected_url = extract_first_http_url(question)
         url_in_current_message = bool(detected_url)
         history_url = self._extract_url_from_history(history) if not detected_url else None
         history_file_id = (
@@ -148,7 +120,7 @@ class RouterNode:
             )
 
         # Fast path: только URL без текста → index_url
-        if detected_url and self._is_url_only(question):
+        if detected_url and is_http_url_only(question):
             logger.info("[Router] Fast path: index_url (URL only)")
             namespace_id, ns_hint = await self._inbox_namespace_if_unset(
                 state.get("namespace_id"), None, config, user_id
@@ -186,7 +158,30 @@ class RouterNode:
                 ],
             }
 
-        # Всё остальное → PlannerNode (intent не задан)
+        # Fast path: файл + вопрос → сначала save_file в Inbox, затем rag_query по этому файлу
+        if file_content and question:
+            logger.info("[Router] Fast path: save_file + rag_query (file with question)")
+            namespace_id, ns_hint = await self._inbox_namespace_if_unset(
+                None, None, config, user_id
+            )
+            return {
+                **state,
+                "intent": IntentType.SAVE_FILE,
+                "detected_url": effective_detected_url,
+                "namespace_id": namespace_id,
+                "namespace_name_hint": ns_hint,
+                "url_in_current_message": url_in_current_message,
+                "has_history_url": bool(history_url),
+                "history_file_id": history_file_id,
+                # search_query сигнализирует SaveFileNode установить file_save_notice
+                # вместо answer, что запускает маршрут → compute_query_embedding
+                "search_query": question,
+                "agent_steps": state.get("agent_steps", []) + [
+                    "[Router] Fast path: save_file + rag_query (file with question)"
+                ],
+            }
+
+        # Всё остальное → IntentNode (intent не задан)
         return {
             **state,
             "detected_url": effective_detected_url,
@@ -195,7 +190,7 @@ class RouterNode:
             "url_in_current_message": url_in_current_message,
             "has_history_url": bool(history_url),
             "agent_steps": state.get("agent_steps", []) + [
-                "[Router] → PlannerNode"
+                "[Router] → IntentNode"
             ],
         }
 

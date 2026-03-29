@@ -1,4 +1,4 @@
-from typing import Any, Dict, Protocol, Optional, List, Tuple
+from typing import Any, Dict, Protocol, Optional, List, Tuple, Sequence
 
 from app.domain.entities import (
     FileEntity,
@@ -139,6 +139,12 @@ class UserFileRepository(Protocol):
     async def get_by_id(self, user_file_id: int) -> Optional[UserFileEntity]:
         ...
 
+    async def list_ids_by_user_and_namespace(
+        self, user_id: int, namespace_id: int
+    ) -> Sequence[int]:
+        """user_files.id в пространстве пользователя (порядок — по created_at)."""
+        ...
+
     async def create(self, user_file: UserFileEntity) -> UserFileEntity:
         ...
 
@@ -163,6 +169,10 @@ class UserFileRepository(Protocol):
 
     async def update_file_id(self, user_file_id: int, new_file_id: int) -> Optional[UserFileEntity]:
         """Переключает UserFile на другой File (для Copy-on-Write при редактировании)."""
+        ...
+
+    async def update_custom_title(self, user_file_id: int, new_title: str) -> Optional[UserFileEntity]:
+        """Обновляет отображаемое имя файла (custom_title)."""
         ...
 
 

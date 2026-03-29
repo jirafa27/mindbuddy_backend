@@ -90,6 +90,8 @@ class PgChatRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> List[ChatMessageEntity]:
+        # Страница 1 = последние N сообщений (как в типичном чате), дальше — более старые.
+        # Сначала выбираем по убыванию времени, затем разворачиваем в хронологический порядок внутри страницы.
         stmt = (
             select(
                 ChatMessage.id,
@@ -102,12 +104,12 @@ class PgChatRepository:
             )
             .join(Chat, ChatMessage.chat_id == Chat.id)
             .where(Chat.id == chat_id, Chat.user_id == user_id)
-            .order_by(ChatMessage.created_at.asc())
+            .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             .offset(offset)
             .limit(limit)
         )
         result = await self.db.execute(stmt)
-        rows = result.all()
+        rows = list(reversed(result.all()))
         return [
             ChatMessageEntity(
                 id=r.id,

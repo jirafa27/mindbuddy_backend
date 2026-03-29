@@ -7,6 +7,7 @@
 - create_file: создать файл из текста
 - delete_file: запросить подтверждение → set_pending_action
 - edit_file: читает текущий текст файла, применяет инструкцию через LLM, сохраняет результат
+- rename_file: меняет отображаемое имя (custom_title) у user_file
 
 Для удаления CrudNode НЕ выполняет действие сразу — возвращает вопрос подтверждения
 и просит ChatService сохранить pending_action. Фактическое удаление происходит в
@@ -26,14 +27,14 @@ from app.domain.protocols import LLMProvider, FileStorage, TaskPublisher
 from app.services.file_service import FileService
 from app.services.namespace_service import NamespaceService
 from app.services.content_extractor import ContentExtractorService
+from app.utils.url import is_http_url_only
+from app.graph.utils.namespace import resolve_namespace_id
 
 logger = logging.getLogger(__name__)
 
 
 class CrudNode:
     """Выполняет CRUD-операции над пространствами и файлами."""
-
-    _URL_RE = re.compile(r'^https?://', re.IGNORECASE)
 
     def __init__(
         self,
@@ -79,6 +80,8 @@ class CrudNode:
                 return await self._request_delete_file(state, user_id, agent_steps, config)
             elif intent == IntentType.EDIT_FILE:
                 return await self._edit_file(state, user_id, agent_steps, config)
+            elif intent == IntentType.RENAME_FILE:
+                return await self._rename_file(state, user_id, agent_steps, config)
             else:
                 return {
                     "answer": f"Неизвестная операция: {intent}",
@@ -277,12 +280,16 @@ class CrudNode:
     ) -> dict[str, Any]:
         namespace_name = state.get("namespace_name_hint")
         namespace_id = state.get("namespace_id")
-        file_id = state.get("history_file_id") or (
-            state.get("search_file_ids") or [None]
-        )[0]
-        # search_query — имя конкретного файла (НЕ берём entity_name как fallback,
-        # потому что для bulk-перемещения entity_name = исходное пространство)
         search_query = state.get("search_query")
+        source_ns_name = state.get("entity_name") if not search_query else None
+
+        # Bulk-перемещение: есть исходное пространство, нет конкретного файла — игнорируем history_file_id
+        if source_ns_name and not search_query:
+            file_id = None
+        else:
+            file_id = state.get("history_file_id") or (
+                state.get("search_file_ids") or [None]
+            )[0]
 
         if not namespace_id and namespace_name:
             namespace_id = await self._resolve_namespace_id(config, user_id, namespace_name)
@@ -294,8 +301,6 @@ class CrudNode:
                 "agent_steps": agent_steps,
             }
 
-        # Bulk-перемещение: entity_name = исходное пространство, search_query = null
-        source_ns_name = state.get("entity_name") if not search_query else None
         if not file_id and not search_query and source_ns_name:
             source_ns_id = await self._resolve_namespace_id(config, user_id, source_ns_name)
             if not source_ns_id:
@@ -303,7 +308,7 @@ class CrudNode:
                     "answer": f"Не нашёл исходное пространство «{source_ns_name}». Уточните название.",
                     "agent_steps": agent_steps,
                 }
-            file_ids = await self._find_all_file_ids_in_namespace(config, user_id, source_ns_id)
+            file_ids = await self._find_all_file_ids_in_namespace(user_id, source_ns_id)
             if not file_ids:
                 return {
                     "answer": f"В пространстве «{source_ns_name}» нет файлов.",
@@ -388,12 +393,12 @@ class CrudNode:
 
         # Если content — это URL, загружаем содержимое страницы
         url_to_fetch: Optional[str] = None
-        if content and self._URL_RE.match(content.strip()):
+        if content and is_http_url_only(content):
             url_to_fetch = content.strip()
         elif not content:
             question = state.get("question") or ""
             detected = state.get("detected_url")
-            candidate = detected or (question.strip() if self._URL_RE.match(question.strip()) else None)
+            candidate = detected or (question.strip() if is_http_url_only(question) else None)
             if candidate:
                 url_to_fetch = candidate
 
@@ -450,6 +455,20 @@ class CrudNode:
             namespace_id=namespace_id,
             title=title,
         )
+
+        if self.task_publisher and file_created.is_new_file and file_created.text:
+            self.task_publisher.send_embeddings_task(
+                content_file_id=file_created.content_file_id,
+                text=file_created.text,
+                namespace_id=namespace_id,
+                filename=file_created.filename,
+                user_file_id=file_created.file_id,
+            )
+            logger.info(
+                "[CrudNode] create_file: sent embeddings task for file_id=%d '%s'",
+                file_created.file_id, file_created.filename,
+            )
+
         ns_part = f" в пространство «{namespace_name or namespace_id}»" if namespace_id else ""
         return {
             "answer": f"Файл «{file_created.filename}» создан и сохранён{ns_part}.",
@@ -465,23 +484,53 @@ class CrudNode:
         config: RunnableConfig,
     ) -> dict[str, Any]:
         """Находит файл(ы), возвращает вопрос подтверждения и сохраняет pending_action."""
-        file_id = state.get("history_file_id") or (
-            state.get("search_file_ids") or [None]
-        )[0]
         search_query = state.get("search_query") or state.get("entity_name")
         namespace_id = state.get("namespace_id")
         namespace_name = state.get("namespace_name_hint")
 
-        # Случай «удали все файлы из пространства X» — нет конкретного файла, но есть namespace
+        # Если задан namespace без конкретного файла — режим namespace, игнорируем history_file_id
+        if namespace_id and not search_query:
+            file_id = None
+        else:
+            file_id = state.get("history_file_id") or (
+                state.get("search_file_ids") or [None]
+            )[0]
+
+        # Случай «удали файлы из пространства X» — нет конкретного файла, но есть namespace
         if not file_id and not search_query and namespace_id:
-            all_ids = await self._find_all_file_ids_in_namespace(config, user_id, namespace_id)
+            all_ids = await self._find_all_file_ids_in_namespace(user_id, namespace_id)
             if not all_ids:
                 ns_label = f"«{namespace_name}»" if namespace_name else f"(id={namespace_id})"
                 return {
                     "answer": f"В пространстве {ns_label} нет файлов.",
                     "agent_steps": agent_steps,
                 }
+
+            search_limit = state.get("search_limit")
             ns_label = f"«{namespace_name}»" if namespace_name else f"(id={namespace_id})"
+
+            # "удали любой/один файл" — берём только первые N
+            if search_limit and search_limit < len(all_ids):
+                target_ids = all_ids[:search_limit]
+                filenames = []
+                for fid in target_ids:
+                    fn = await self._get_filename(config, fid, user_id)
+                    filenames.append(fn or f"id={fid}")
+                names_str = ", ".join(f"«{n}»" for n in filenames)
+                pending = {
+                    "type": "delete_all_in_namespace",
+                    "params": {"namespace_id": namespace_id, "file_ids": target_ids},
+                    "target": f"файл(ы) {names_str} из пространства {ns_label}",
+                }
+                return {
+                    "answer": (
+                        f"Вы уверены, что хотите удалить {names_str} из пространства {ns_label}? "
+                        "Это действие нельзя отменить. Напишите «да» для подтверждения."
+                    ),
+                    "pending_action": pending,
+                    "agent_steps": agent_steps,
+                }
+
             count = len(all_ids)
             pending = {
                 "type": "delete_all_in_namespace",
@@ -521,6 +570,117 @@ class CrudNode:
                 "Это действие нельзя отменить. Напишите «да» для подтверждения."
             ),
             "pending_action": pending,
+            "agent_steps": agent_steps,
+        }
+
+    @staticmethod
+    def _parse_bulk_new_names(entity_content: Optional[str]) -> list[str]:
+        if not entity_content or not str(entity_content).strip():
+            return []
+        t = str(entity_content).strip().replace(" и ", ",")
+        parts = re.split(r"[,;]", t)
+        return [p.strip() for p in parts if p.strip()]
+
+    async def _rename_file(
+        self,
+        state: AskState,
+        user_id: int,
+        agent_steps: list,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
+        """Переименование отображаемого имени файла (custom_title)."""
+        search_query = state.get("search_query")
+        new_name_single = (state.get("entity_name") or "").strip() or None
+        entity_content_raw = state.get("entity_content")
+        namespace_id = state.get("namespace_id")
+
+        configurable = config.get("configurable") or {}
+        user_file_repository = configurable.get("user_file_repository")
+        if not user_file_repository:
+            return {"answer": "Ошибка: репозиторий файлов недоступен.", "agent_steps": agent_steps}
+
+        bulk_names = self._parse_bulk_new_names(
+            entity_content_raw if isinstance(entity_content_raw, str) else None
+        )
+
+        # Пакетное переименование: список имён в entity_content, без одного нового имени в entity_name
+        if bulk_names and not new_name_single:
+            if not namespace_id:
+                return {
+                    "answer": (
+                        "Чтобы переименовать несколько файлов, укажите пространство в сообщении "
+                        "или откройте его в интерфейсе."
+                    ),
+                    "agent_steps": agent_steps,
+                }
+            file_ids = await self._find_all_file_ids_in_namespace(user_id, namespace_id)
+            if not file_ids:
+                return {"answer": "В этом пространстве нет файлов.", "agent_steps": agent_steps}
+            if len(bulk_names) != len(file_ids):
+                return {
+                    "answer": (
+                        f"В пространстве {len(file_ids)} файл(ов), в сообщении — {len(bulk_names)} имён. "
+                        "Перечислите новые имена через запятую в том же порядке, что и файлы в пространстве."
+                    ),
+                    "agent_steps": agent_steps,
+                }
+            done: list[str] = []
+            for fid, raw_title in zip(file_ids, bulk_names):
+                safe = FileService.sanitize_filename(raw_title)
+                if not safe:
+                    return {
+                        "answer": f"Недопустимое имя: «{raw_title}».",
+                        "agent_steps": agent_steps,
+                    }
+                await user_file_repository.update_custom_title(fid, safe)
+                done.append(safe)
+            return {
+                "answer": "Переименовано: " + ", ".join(f"«{n}»" for n in done) + ".",
+                "agent_steps": agent_steps,
+            }
+
+        if not new_name_single:
+            return {
+                "answer": "Укажите новое имя файла или список имён через запятую.",
+                "agent_steps": agent_steps,
+            }
+
+        safe_new = FileService.sanitize_filename(new_name_single)
+        if not safe_new:
+            return {"answer": "Недопустимое новое имя файла.", "agent_steps": agent_steps}
+
+        file_id: Optional[int] = state.get("history_file_id") or (
+            (state.get("search_file_ids") or [None])[0]
+        )
+        if search_query:
+            file_id = await self._find_file_id_by_name(config, user_id, search_query)
+        elif not file_id and namespace_id:
+            all_ids = await self._find_all_file_ids_in_namespace(user_id, namespace_id)
+            if len(all_ids) == 1:
+                file_id = all_ids[0]
+            elif len(all_ids) > 1:
+                return {
+                    "answer": (
+                        "В пространстве несколько файлов — укажите текущее имя файла, "
+                        "который нужно переименовать."
+                    ),
+                    "agent_steps": agent_steps,
+                }
+
+        if not file_id:
+            hint = f" «{search_query}»" if search_query else ""
+            return {
+                "answer": f"Не нашёл файл{hint}. Уточните название.",
+                "agent_steps": agent_steps,
+            }
+
+        uf = await user_file_repository.get_by_id(file_id)
+        if not uf or uf.user_id != user_id:
+            return {"answer": "Файл не найден или нет доступа.", "agent_steps": agent_steps}
+
+        await user_file_repository.update_custom_title(file_id, safe_new)
+        return {
+            "answer": f"Файл переименован в «{safe_new}».",
             "agent_steps": agent_steps,
         }
 
@@ -601,12 +761,18 @@ class CrudNode:
         agent_steps: list,
         config: RunnableConfig,
     ) -> dict[str, Any]:
-        file_id = state.get("history_file_id") or (
-            state.get("search_file_ids") or [None]
-        )[0]
         search_query = state.get("search_query") or state.get("entity_name")
         edit_instruction = state.get("entity_content")
         namespace_id = state.get("namespace_id")
+
+        # Если задан namespace без конкретного файла — режим bulk-edit: игнорируем history_file_id
+        # (пользователь хочет редактировать все файлы пространства, а не тот что открыт)
+        if namespace_id and not search_query:
+            file_id = None
+        else:
+            file_id = state.get("history_file_id") or (
+                state.get("search_file_ids") or [None]
+            )[0]
 
         if not edit_instruction:
             return {
@@ -619,30 +785,15 @@ class CrudNode:
 
         # Если конкретный файл не найден, но есть namespace — редактируем все файлы пространства
         if not file_id and namespace_id:
-            file_ids = await self._find_all_file_ids_in_namespace(config, user_id, namespace_id)
+            file_ids = await self._find_all_file_ids_in_namespace(user_id, namespace_id)
             if not file_ids:
                 return {
                     "answer": "В указанном пространстве не найдено файлов.",
                     "agent_steps": agent_steps,
                 }
             
-            # Запускаем фоновую задачу редактирования файлов
-            if self.task_publisher:
-                task_id = self.task_publisher.send_bulk_edit_task(
-                    file_ids=file_ids,
-                    user_id=user_id,
-                    edit_instruction=edit_instruction,
-                    namespace_id=namespace_id,
-                )
-                logger.info("[CrudNode] Bulk edit task started: task_id=%s files=%d", task_id, len(file_ids))
-                return {
-                    "answer": f"Начинаю редактирование {len(file_ids)} файлов пространства. Процесс запущен в фоне, это может занять несколько минут.",
-                    "task_id": task_id,
-                    "agent_steps": agent_steps,
-                }
-            
-            # Fallback: синхронное редактирование если нет task_publisher
-            logger.warning("[CrudNode] No task_publisher, falling back to sync bulk edit")
+            # Синхронное редактирование всех файлов пространства
+            logger.info("[CrudNode] Starting sync bulk edit: files=%d", len(file_ids))
             edited_names: list[str] = []
             failed_names: list[str] = []
             for fid in file_ids:
@@ -842,40 +993,19 @@ class CrudNode:
         self, config: RunnableConfig, user_id: int, name: str
     ) -> Optional[int]:
         """Ищет namespace по имени (case-insensitive)."""
-        try:
-            db = (config.get("configurable") or {}).get("async_db")
-            if not db:
-                return None
-            result = await db.execute(
-                text(
-                    "SELECT id FROM namespaces "
-                    "WHERE user_id = :user_id AND LOWER(name) = LOWER(:name) LIMIT 1"
-                ),
-                {"user_id": user_id, "name": name},
-            )
-            row = result.mappings().first()
-            return row["id"] if row else None
-        except Exception as exc:
-            logger.warning("[CrudNode] Failed to resolve namespace '%s': %s", name, exc)
+        db = (config.get("configurable") or {}).get("async_db")
+        if not db:
             return None
+        return await resolve_namespace_id(db, user_id, name)
 
     async def _find_all_file_ids_in_namespace(
-        self, config: RunnableConfig, user_id: int, namespace_id: int
+        self, user_id: int, namespace_id: int
     ) -> list[int]:
         """Возвращает все user_files.id пользователя в указанном пространстве."""
         try:
-            db = (config.get("configurable") or {}).get("async_db")
-            if not db:
-                return []
-            result = await db.execute(
-                text(
-                    "SELECT uf.id FROM user_files uf "
-                    "WHERE uf.user_id = :user_id AND uf.namespace_id = :namespace_id "
-                    "ORDER BY uf.created_at ASC"
-                ),
-                {"user_id": user_id, "namespace_id": namespace_id},
+            return await self.file_service.list_user_file_ids_in_namespace(
+                user_id, namespace_id
             )
-            return [row["id"] for row in result.mappings().all()]
         except Exception as exc:
             logger.warning(
                 "[CrudNode] Failed to list files in namespace %s: %s", namespace_id, exc

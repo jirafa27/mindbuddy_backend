@@ -70,6 +70,10 @@ class MindBuddyAgent:
         # Pipeline-отчёт от MultiActionNode — формируем связный ответ через LLM
         pipeline_report = state.get("pipeline_report")
         if pipeline_report:
+            # Если в батче есть отложенные удаления — спрашиваем подтверждение, не сообщаем об успехе
+            pending_action = state.get("pending_action")
+            if pending_action:
+                return self._format_pending_confirmation(pending_action, pipeline_report, agent_steps)
             return await self._summarize_pipeline(pipeline_report, question, agent_steps)
 
         # Если ответ уже сформирован ранее (например, RouterNode) — просто возвращаем его
@@ -245,3 +249,35 @@ class MindBuddyAgent:
                 "sources": [],
                 "agent_steps": agent_steps + ["MindBuddyAgent (pipeline fallback)"],
             }
+
+    def _format_pending_confirmation(
+        self,
+        pending_action: dict,
+        pipeline_report: list,
+        agent_steps: list,
+    ) -> dict[str, Any]:
+        """Формирует запрос подтверждения для отложенных delete-операций из батча."""
+        targets: list[str] = []
+
+        if pending_action.get("type") == "batch_delete":
+            for item in pending_action.get("items") or []:
+                targets.append(item.get("target", "объект"))
+        else:
+            target = pending_action.get("target")
+            if target:
+                targets.append(target)
+
+        if targets:
+            items_list = "\n".join(f"— {t}" for t in targets)
+            answer = (
+                f"Подтвердите удаление следующих объектов:\n{items_list}\n\n"
+                "Это действие нельзя отменить. Напишите «да» для подтверждения."
+            )
+        else:
+            answer = "Подтвердите выполнение операции. Напишите «да» для подтверждения."
+
+        return {
+            "answer": answer,
+            "sources": [],
+            "agent_steps": agent_steps + ["MindBuddyAgent (pending confirmation)"],
+        }

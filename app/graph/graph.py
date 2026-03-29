@@ -12,7 +12,8 @@ from app.graph.nodes.sql_agent import SQLAgent
 from app.graph.nodes.mind_buddy_agent import MindBuddyAgent
 from app.graph.nodes.query_embedding_node import QueryEmbeddingNode
 from app.graph.nodes.router_node import RouterNode
-from app.graph.nodes.planner_node import PlannerNode
+from app.graph.nodes.intent_node import IntentNode
+from app.graph.nodes.action_resolver_node import ActionResolverNode
 from app.graph.nodes.summary_node import SummaryNode
 from app.graph.nodes.index_url_node import IndexUrlNode
 from app.graph.nodes.send_file_node import SendFileNode
@@ -23,7 +24,7 @@ from app.services.file_service import FileService
 from app.services.namespace_service import NamespaceService
 from app.services.text_chunker import TextChunkerService
 from app.services.content_extractor import ContentExtractorService
-from app.services.planner_service import PlannerService
+from app.services.intent_classifier import IntentClassifierService
 from app.utils.file_readers import FileReaderFactory
 from app.domain.protocols import LLMProvider
 from app.core.enums import IntentType
@@ -37,7 +38,7 @@ def _route_after_router(state: AskState) -> str:
     После RouterNode: маршрутизация по намерению.
 
     Если intent задан (fast paths: URL-only, file-only, override) — прямо в узел.
-    Если intent не задан — запрос требует LLM-планирования → planner_node.
+    Если intent не задан — запрос требует LLM-планирования → intent_node.
     Если pending_actions заполнен — multi_action_node.
     Если answer уже есть (ошибка) — mind_buddy_agent.
     """
@@ -50,14 +51,14 @@ def _route_after_router(state: AskState) -> str:
     intent = state.get("intent")
 
     if not intent:
-        return "planner_node"
+        return "intent_node"
 
     return _intent_to_node(intent)
 
 
-def _route_after_planner(state: AskState) -> str:
+def _route_after_resolver(state: AskState) -> str:
     """
-    После PlannerNode: маршрутизация по результату планирования.
+    После ActionResolverNode: маршрутизация по результату.
 
     Если pending_actions — multi_action_node.
     Иначе — по intent (одношаговый план).
@@ -95,6 +96,7 @@ def _intent_to_node(intent) -> str:
         IntentType.CREATE_FILE,
         IntentType.DELETE_FILE,
         IntentType.EDIT_FILE,
+        IntentType.RENAME_FILE,
         IntentType.SAVE_SUMMARY,
     ):
         return "crud_node"
@@ -150,13 +152,14 @@ def build_ask_graph(
     Собирает граф для /ask. Перед использованием вызвать .compile().
 
     Структура графа:
-    START -> RouterNode -> [fast paths: index_url, file_agent] | planner_node
-    planner_node -> [routing by intent] | multi_action_node -> mind_buddy_agent -> END
+    START -> RouterNode -> [fast paths: index_url, file_agent] | intent_node
+    intent_node -> action_resolver_node -> [routing by intent] | multi_action_node -> mind_buddy_agent -> END
     """
     router_node = RouterNode()
 
-    planner_service = PlannerService(llm_service=llm_service)
-    planner_node = PlannerNode(planner_service=planner_service)
+    intent_classifier = IntentClassifierService(llm_service=llm_service)
+    intent_node = IntentNode(intent_classifier=intent_classifier)
+    action_resolver_node = ActionResolverNode(llm_service=llm_service)
 
     crud_node = CrudNode(
         file_service=file_service,
@@ -201,7 +204,8 @@ def build_ask_graph(
     graph = StateGraph(AskState)
 
     graph.add_node("router", router_node.run)
-    graph.add_node("planner_node", planner_node.run)
+    graph.add_node("intent_node", intent_node.run)
+    graph.add_node("action_resolver_node", action_resolver_node.run)
     graph.add_node("crud_node", crud_node.run)
     graph.add_node("multi_action_node", multi_action_node.run)
     graph.add_node("file_agent", file_agent.run)
@@ -220,7 +224,7 @@ def build_ask_graph(
 
     # Маршрутизация после роутера
     routing_map = {
-        "planner_node": "planner_node",
+        "intent_node": "intent_node",
         "file_agent": "file_agent",
         "summary_node": "summary_node",
         "compute_query_embedding": "compute_query_embedding",
@@ -234,9 +238,12 @@ def build_ask_graph(
         routing_map["index_url_node"] = "index_url_node"
     graph.add_conditional_edges("router", _route_after_router, routing_map)
 
-    # Маршрутизация после планировщика (те же узлы, без planner_node)
-    planner_routing_map = {k: v for k, v in routing_map.items() if k != "planner_node"}
-    graph.add_conditional_edges("planner_node", _route_after_planner, planner_routing_map)
+    # IntentNode → ActionResolverNode (безусловное)
+    graph.add_edge("intent_node", "action_resolver_node")
+
+    # Маршрутизация после ActionResolverNode
+    resolver_routing_map = {k: v for k, v in routing_map.items() if k != "intent_node"}
+    graph.add_conditional_edges("action_resolver_node", _route_after_resolver, resolver_routing_map)
 
     graph.add_edge("file_agent", "save_file_node")
     graph.add_conditional_edges("save_file_node", _route_after_save_file, {

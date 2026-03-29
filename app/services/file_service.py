@@ -128,6 +128,17 @@ class FileService:
         
         return DeduplicationResult(is_duplicate=False)
 
+    async def list_user_file_ids_in_namespace(
+        self, user_id: int, namespace_id: int
+    ) -> list[int]:
+        """Все user_files.id пользователя в пространстве (порядок — по created_at)."""
+        if not self.user_file_repository:
+            raise ValueError("user_file_repository is required")
+        ids = await self.user_file_repository.list_ids_by_user_and_namespace(
+            user_id, namespace_id
+        )
+        return list(ids)
+
     @staticmethod
     def content_hash_from_url(url: str) -> str:
         """

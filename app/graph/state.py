@@ -52,7 +52,7 @@ class AskState(TypedDict, total=False):
     detected_url: Optional[str]  # URL из вопроса или истории
     history_file_id: Optional[int]  # file_id из истории
 
-    # Флаги контекста URL (выставляются RouterNode, используются PlannerNode)
+    # Флаги контекста URL (выставляются RouterNode, используются ActionResolverNode)
     url_in_current_message: Optional[bool]  # URL в текущем сообщении (не из истории)
     has_history_url: Optional[bool]         # URL найден в истории, но не в текущем сообщении
 
@@ -98,6 +98,9 @@ class AskState(TypedDict, total=False):
 
     # Отложенное действие (хранится в чате, передаётся ChatService → grafu при confirm)
     pending_action: Optional[Dict[str, Any]]
+
+    # Список намерений, определённых IntentNode (для ActionResolverNode)
+    planned_intents: Optional[List[str]]
 
     # Список действий для MultiActionNode (multi_action intent)
     pending_actions: Optional[List[Dict[str, Any]]]

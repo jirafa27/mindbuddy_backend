@@ -25,7 +25,7 @@ tool, namespace_hint, search_query, search_mode, entity_name, entity_description
 
 tool — одно из:
 rag_query | send_file | list_files | summarize | save_summary | save_file | index_url |
-create_file | edit_file | delete_file | create_namespace | edit_namespace_name |
+create_file | edit_file | rename_file | delete_file | create_namespace | edit_namespace_name |
 edit_namespace_description | delete_namespace | move_file | general_chat
 
 Описание инструментов:
@@ -43,6 +43,7 @@ edit_namespace_description | delete_namespace | move_file | general_chat
 - index_url: сохранить URL в базу знаний (без суммаризации).
 - create_file: создать заметку из текста. entity_content = текст, entity_name = заголовок.
 - edit_file: изменить содержимое файла. search_query = имя файла, entity_content = инструкция.
+- rename_file: переименовать файл(ы) (только отображаемое имя). Один файл: search_query = текущее имя, entity_name = новое имя. Несколько файлов в пространстве: search_query = null, namespace_hint = пространство, entity_content = новые имена через запятую в порядке файлов (например "Совет1, Совет2, Совет3").
 - delete_file: удалить файл. search_query = имя файла.
   Для удаления ВСЕХ файлов из пространства: search_query = null, namespace_hint = название пространства.
 - move_file: ПЕРЕМЕСТИТЬ файл ИЗ одного пространства В другое (требуются ДВА пространства!).
@@ -134,6 +135,8 @@ edit_namespace_description | delete_namespace | move_file | general_chat
 "создай пространство Работа" → {"steps":[{"tool":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"Работа","entity_description":null,"entity_content":null}]}
 "привет" → {"steps":[{"tool":"general_chat","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
 "переименуй пространство Работа в Задачи" → {"steps":[{"tool":"edit_namespace_name","search_query":null,"namespace_hint":"Работа","search_mode":null,"entity_name":"Задачи","entity_description":null,"entity_content":null}]}
+"переименуй файлы в Совет1, Совет2 и Совет3" → {"steps":[{"tool":"rename_file","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":null,"entity_description":null,"entity_content":"Совет1, Совет2, Совет3"}]}
+"переименуй файл отчёт в финальный отчёт" → {"steps":[{"tool":"rename_file","search_query":"отчёт","namespace_hint":null,"search_mode":null,"entity_name":"финальный отчёт","entity_description":null,"entity_content":null}]}
 "добавь описание «Мои задачи» к пространству Задачи" → {"steps":[{"tool":"edit_namespace_description","search_query":null,"namespace_hint":"Задачи","search_mode":null,"entity_name":null,"entity_description":"Мои задачи","entity_content":null}]}
 "сохрани резюме в новое пространство Резюме" → {"steps":[{"tool":"create_namespace","search_query":null,"namespace_hint":null,"search_mode":null,"entity_name":"Резюме","entity_description":null,"entity_content":null},{"tool":"summarize","search_query":null,"namespace_hint":"Резюме","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"tool":"create_file","search_query":null,"namespace_hint":"Резюме","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}
 "сохрани краткое содержание в пространство Статьи" → {"steps":[{"tool":"summarize","search_query":null,"namespace_hint":"Статьи","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null},{"tool":"create_file","search_query":null,"namespace_hint":"Статьи","search_mode":null,"entity_name":null,"entity_description":null,"entity_content":null}]}

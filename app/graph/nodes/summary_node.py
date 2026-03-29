@@ -1,5 +1,4 @@
 """SummaryNode — дирижёр суммаризации: FileService (контент) → SummaryService (кэш) → Agent → SummaryService (сохранение)."""
-import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -25,7 +24,7 @@ class SummaryNode:
     async def run(self, state: AskState, config: RunnableConfig) -> AskState:
         user_id = state.get("user_id")
         configurable = (config or {}).get("configurable") or {}
-        file_service: FileService = configurable.get("file_service")
+        file_service: Optional[FileService] = configurable.get("file_service")
         content_extractor = configurable.get("content_extractor")
         summary_service: SummaryService = configurable.get("summary_service")
         summary_agent = configurable.get("summary_agent")
@@ -63,6 +62,29 @@ class SummaryNode:
             )
         elif history_file_id:
             return await self._summarize_existing_file(state, file_service, summary_service, summary_agent, user_id)
+
+        # Нет конкретного файла/URL — если есть namespace, суммаризируем все файлы пространства
+        namespace_id = state.get("namespace_id")
+        if namespace_id:
+            if not file_service:
+                logger.error("[SummaryNode] file_service required for namespace summarization")
+                return {
+                    **state,
+                    "answer": "Ошибка: сервис файлов недоступен",
+                    "agent_steps": state.get("agent_steps", []) + ["[SummaryNode] Error: missing file_service"],
+                }
+            ns_file_ids = await file_service.list_user_file_ids_in_namespace(
+                user_id, namespace_id
+            )
+            if ns_file_ids:
+                logger.info(
+                    "[SummaryNode] Summarizing %d files from namespace_id=%d",
+                    len(ns_file_ids), namespace_id,
+                )
+                return await self._summarize_multiple_files(
+                    state, summary_service, summary_agent, user_id, ns_file_ids
+                )
+
         return {
             **state,
             "answer": "Не нашёл что суммаризировать. Отправьте файл или ссылку.",
@@ -135,38 +157,32 @@ class SummaryNode:
         user_id: int,
         file_ids: List[int],
     ) -> AskState:
-        """Суммаризует каждый файл из списка параллельно и объединяет ответы."""
+        """Суммаризует файлы последовательно и объединяет ответы."""
         logger.info("[SummaryNode] Summarizing %d files: %s", len(file_ids), file_ids)
-
-        async def _do_one(file_id: int) -> Optional[SummaryResponse]:
-            try:
-                content_or_cached = await summary_service.get_content_for_summarization_existing_file(
-                    file_id=file_id, user_id=user_id
-                )
-                if isinstance(content_or_cached, SummaryResponse):
-                    logger.info("[SummaryNode] Cached summary for file_id=%d", file_id)
-                    return content_or_cached
-                content = content_or_cached
-                summary_result = await summary_agent.summarize(content.text, title=content.title)
-                await summary_service.save_summary(content.content_file_id, summary_result)
-                return SummaryService.build_summary_response(content, summary_result)
-            except Exception:
-                logger.exception("[SummaryNode] Failed to summarize file_id=%d", file_id)
-                return None
-
-        results = await asyncio.gather(*[_do_one(fid) for fid in file_ids])
 
         parts: List[str] = []
         steps: List[str] = []
-        for fid, res in zip(file_ids, results):
-            if res is None:
-                parts.append(f"**[file_id={fid}]** — не удалось суммаризировать.")
-                steps.append(f"[SummaryNode] Failed: file_id={fid}")
-            else:
+        for fid in file_ids:
+            try:
+                content_or_cached = await summary_service.get_content_for_summarization_existing_file(
+                    file_id=fid, user_id=user_id
+                )
+                if isinstance(content_or_cached, SummaryResponse):
+                    logger.info("[SummaryNode] Cached summary for file_id=%d", fid)
+                    res = content_or_cached
+                else:
+                    content = content_or_cached
+                    summary_result = await summary_agent.summarize(content.text, title=content.title)
+                    await summary_service.save_summary(content.content_file_id, summary_result)
+                    res = SummaryService.build_summary_response(content, summary_result)
                 title = res.title or f"file_id={fid}"
-                cached_mark = " _(💾 кэш)_" if res.is_cached else ""
+                cached_mark = " _(кэш)_" if res.is_cached else ""
                 parts.append(f"**{title}**{cached_mark}\n{res.summary}")
                 steps.append(f"[SummaryNode] Done: file_id={fid}, cached={res.is_cached}")
+            except Exception:
+                logger.exception("[SummaryNode] Failed to summarize file_id=%d", fid)
+                parts.append(f"**[file_id={fid}]** — не удалось суммаризировать.")
+                steps.append(f"[SummaryNode] Failed: file_id={fid}")
 
         answer = "\n\n---\n\n".join(parts)
         return {
@@ -261,7 +277,7 @@ class SummaryNode:
         if namespace_name_hint:
             parts.append(f"_Файл сохранён в пространство «{namespace_name_hint}»._\n\n")
         if result.title:
-            parts.append(f"{result.title}")
+            parts.append(f"{result.title}\n\n")
         parts.append(result.summary)
         if result.source_url:
             parts.append(f"\n\n🔗 Источник: {result.source_url}")

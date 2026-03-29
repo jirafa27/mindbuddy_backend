@@ -28,6 +28,7 @@ class IntentType(str, Enum):
     CREATE_FILE = "create_file"               # Создать файл из текста
     DELETE_FILE = "delete_file"               # Удалить файл
     EDIT_FILE = "edit_file"                   # Редактировать содержимое файла
+    RENAME_FILE = "rename_file"               # Переименовать файл (изменить custom_title)
     SAVE_SUMMARY = "save_summary"             # Сохранить последний ответ ассистента как файл
 
 

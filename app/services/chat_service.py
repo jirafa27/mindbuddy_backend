@@ -40,6 +40,15 @@ def _is_confirmation(text: str) -> bool:
     return text.strip().lower().rstrip("!.,") in _CONFIRM_WORDS
 
 
+def _last_namespace_id_from_history(history: List[dict]) -> Optional[int]:
+    """Возвращает namespace_id последнего сообщения, у которого он не None."""
+    for msg in reversed(history):
+        ns = msg.get("namespace_id")
+        if ns is not None:
+            return int(ns)
+    return None
+
+
 def _decline_message(pending: dict) -> str:
     """Возвращает сообщение об отмене в зависимости от типа отложенного действия."""
     action_type = pending.get("type", "")
@@ -136,7 +145,12 @@ class ChatService:
                         offset=offset,
                     )
                     history_for_llm = [
-                        {"role": m.role.value, "text": m.text, "file_ids": m.file_ids}
+                        {
+                            "role": m.role.value,
+                            "text": m.text,
+                            "file_ids": m.file_ids,
+                            "namespace_id": m.namespace_id,
+                        }
                         for m in history_entities
                     ]
 
@@ -179,6 +193,10 @@ class ChatService:
                 resolved_chat_id = new_chat.id
                 await self.db.commit()
 
+        # Если клиент не передал namespace_id — не инжектируем его из истории на уровне ChatService,
+        # потому что интент ещё не известен и широкий запрос («покажи все файлы») ошибочно
+        # получит scoping по последнему пространству. Восстановление namespace по истории
+        # делается intent-aware внутри ActionResolverNode (_HISTORY_NS_INTENTS).
         first_file_content = files[0][0] if files else None
         first_filename = files[0][1] if files else None
 
@@ -283,7 +301,12 @@ class ChatService:
             )
             # При сохранении файлов файлы относятся к сообщению пользователя, не ассистента
             assistant_file_ids = [] if is_save_file else result_file_ids
-            resolved_namespace_id = result.get("namespace_id") or namespace_id
+            resolved_namespace_id = (
+                result.get("created_namespace_id")
+                or result.get("namespace_id")
+                or namespace_id
+                or _last_namespace_id_from_history(history_for_llm)
+            )
             await self.chat_repository.add_message(
                 resolved_chat_id, ChatMessageRole.ASSISTANT.value, answer_text,
                 file_ids=assistant_file_ids,

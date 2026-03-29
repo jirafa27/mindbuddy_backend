@@ -17,6 +17,7 @@ from typing import Any, List, Optional
 from langchain_core.runnables import RunnableConfig
 
 from app.graph.state import AskState
+from app.graph.sub_state_builder import build_sub_state
 from app.graph.nodes.crud_node import CrudNode
 from app.graph.nodes.generate_content_node import GenerateContentNode
 from app.graph.nodes.file_agent import FileAgent
@@ -26,6 +27,35 @@ logger = logging.getLogger(__name__)
 
 # Интенты, которые маршрутизируются через pipeline (не CrudNode)
 _PIPELINE_INTENTS = {"index_url", "summarize", "save_file"}
+
+
+def _deduplicate_create_file_names(actions: List[dict]) -> List[dict]:
+    """
+    Если несколько create_file шагов имеют одинаковый непустой entity_name,
+    добавляет числовой суффикс: «Совет» → «Совет 1», «Совет 2», «Совет 3».
+    Шаги с entity_name=None не трогает (timestamp-имя гарантирует уникальность).
+    """
+    from collections import Counter
+
+    name_counts: Counter = Counter(
+        a["entity_name"]
+        for a in actions
+        if a.get("intent") == "create_file" and a.get("entity_name")
+    )
+    duplicates = {name for name, count in name_counts.items() if count > 1}
+    if not duplicates:
+        return actions
+
+    seen: dict[str, int] = {}
+    result = []
+    for action in actions:
+        if action.get("intent") == "create_file":
+            name = action.get("entity_name") or ""
+            if name in duplicates:
+                seen[name] = seen.get(name, 0) + 1
+                action = {**action, "entity_name": f"{name} {seen[name]}"}
+        result.append(action)
+    return result
 
 
 def _expand_summarize_create_file(
@@ -125,6 +155,8 @@ class MultiActionNode:
         # Разворачиваем summarize → create_file пары если несколько файлов
         search_file_ids: List[int] = state.get("search_file_ids") or []
         actions = _expand_summarize_create_file(actions, search_file_ids)
+        # Если несколько create_file шагов имеют одинаковое имя — нумеруем их
+        actions = _deduplicate_create_file_names(actions)
 
         all_steps = list(state.get("agent_steps") or [])
         total = len(actions)
@@ -157,18 +189,21 @@ class MultiActionNode:
                     )
 
             base_step = f"[MultiActionNode] action {i + 1}/{total}: {intent}"
-            sub_state: AskState = {
-                **state,
-                "intent": intent,
-                "namespace_id": ns_id,
-                "namespace_name_hint": ns_hint or action.get("namespace_name_hint"),
-                "search_query": action.get("search_query"),
-                "entity_name": action.get("entity_name"),
-                "entity_description": action.get("entity_description"),
-                "entity_content": action.get("entity_content"),
-                "answer": None,
-                "agent_steps": all_steps + [base_step],
-            }
+            # ns_id из батча/action перезаписывает UI только если не None;
+            # иначе builder скопирует namespace_id из state через COMMON
+            ns_overrides: dict[str, Any] = {"namespace_id": ns_id} if ns_id is not None else {}
+            sub_state: AskState = build_sub_state(
+                state, intent,
+                namespace_name_hint=ns_hint or action.get("namespace_name_hint"),
+                search_query=action.get("search_query"),
+                search_limit=action.get("search_limit"),
+                entity_name=action.get("entity_name"),
+                entity_description=action.get("entity_description"),
+                entity_content=action.get("entity_content"),
+                answer=None,
+                agent_steps=all_steps + [base_step],
+                **ns_overrides,
+            )
 
             try:
                 if intent == "index_url":
@@ -260,6 +295,26 @@ class MultiActionNode:
             logger.info("[MultiActionNode] index_url: captured file_id=%d", file_id)
         return result
 
+    async def _user_file_ids_in_namespace_for_summarize(
+        self,
+        config: RunnableConfig,
+        user_id: Optional[int],
+        namespace_id: Optional[int],
+    ) -> list[int]:
+        """Те же правила, что в SummaryNode: user_id + namespace_id, порядок по created_at."""
+        if user_id is None or namespace_id is None:
+            return []
+        file_service = ((config or {}).get("configurable") or {}).get("file_service")
+        if not file_service:
+            logger.warning(
+                "[MultiActionNode] file_service отсутствует в config — "
+                "не удаётся получить список файлов пространства для summarize"
+            )
+            return []
+        return await file_service.list_user_file_ids_in_namespace(
+            user_id, namespace_id
+        )
+
     async def _run_summarize(
         self,
         sub_state: AskState,
@@ -302,14 +357,10 @@ class MultiActionNode:
             # Явный namespace в шаге плана → суммаризируем файлы пространства,
             # игнорируем history_file_id из роутера (пользователь спросил о пространстве)
             ns_id = sub_state.get("namespace_id")
-            db = (config or {}).get("configurable", {}).get("async_db")
-            if db and ns_id:
-                from sqlalchemy import select
-                from app.infrastructure.db.models import UserFile
-                q_result = await db.execute(
-                    select(UserFile.id).where(UserFile.namespace_id == ns_id)
+            if ns_id is not None:
+                ns_file_ids = await self._user_file_ids_in_namespace_for_summarize(
+                    config, sub_state.get("user_id"), ns_id
                 )
-                ns_file_ids = [row[0] for row in q_result.fetchall()]
                 if ns_file_ids:
                     logger.info(
                         "[MultiActionNode] summarize: expanding to %d files in namespace_id=%d (explicit ns hint)",
@@ -330,25 +381,20 @@ class MultiActionNode:
         ):
             # Нет конкретного файла — суммаризируем все файлы пространства
             ns_id = sub_state["namespace_id"]
-            db = (config or {}).get("configurable", {}).get("async_db")
-            if db:
-                from sqlalchemy import select
-                from app.infrastructure.db.models import UserFile
-                q_result = await db.execute(
-                    select(UserFile.id).where(UserFile.namespace_id == ns_id)
+            ns_file_ids = await self._user_file_ids_in_namespace_for_summarize(
+                config, sub_state.get("user_id"), ns_id
+            )
+            if ns_file_ids:
+                logger.info(
+                    "[MultiActionNode] summarize: expanding to %d files in namespace_id=%d",
+                    len(ns_file_ids), ns_id,
                 )
-                ns_file_ids = [row[0] for row in q_result.fetchall()]
-                if ns_file_ids:
-                    logger.info(
-                        "[MultiActionNode] summarize: expanding to %d files in namespace_id=%d",
-                        len(ns_file_ids), ns_id,
-                    )
-                    sub_state = {
-                        **sub_state,
-                        "search_file_ids": ns_file_ids,
-                        "detected_url": None,
-                        "file_content": None,
-                    }
+                sub_state = {
+                    **sub_state,
+                    "search_file_ids": ns_file_ids,
+                    "detected_url": None,
+                    "file_content": None,
+                }
 
         result = await self.summary_node.run(sub_state, config)
         summary_result = result.get("summary_result") or {}
