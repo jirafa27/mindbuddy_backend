@@ -20,6 +20,8 @@ class NamespaceEntity:
     id: int
     user_id: int
     name: str
+    parent_id: Optional[int] = None
+    kind: str = "regular"
     description: Optional[str] = None
     user_files: List[NamespaceFileItem] = field(default_factory=list)
     created_at: Optional[datetime] = None

@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 from app.infrastructure.db.models import Namespace, UserFile
 from app.domain.entities import NamespaceEntity, NamespaceFileItem, UserFileEntity
@@ -23,6 +23,14 @@ class PgNamespaceRepository:
                     file_id=uf.file_id,
                     namespace_id=uf.namespace_id,
                     custom_title=uf.custom_title,
+                    vault_relative_path=uf.vault_relative_path,
+                    created_at=uf.created_at,
+                    updated_at=uf.updated_at,
+                    desktop_updated_at=uf.desktop_updated_at,
+                    app_updated_at=uf.app_updated_at,
+                    last_update_source=uf.last_update_source,
+                    is_conflict_copy=uf.is_conflict_copy,
+                    conflict_origin_user_file_id=uf.conflict_origin_user_file_id,
                 )
                 for uf in model.user_files
             ]
@@ -30,6 +38,8 @@ class PgNamespaceRepository:
             id=model.id,
             user_id=model.user_id,
             name=model.name,
+            parent_id=model.parent_id,
+            kind=model.kind,
             description=model.description,
             created_at=model.created_at,
             user_files=user_files,
@@ -42,6 +52,15 @@ class PgNamespaceRepository:
             file_id=model.file_id,
             namespace_id=model.namespace_id,
             custom_title=model.custom_title,
+            vault_relative_path=model.vault_relative_path,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+            desktop_updated_at=model.desktop_updated_at,
+            app_updated_at=model.app_updated_at,
+            content_revision=model.content_revision,
+            last_update_source=model.last_update_source,
+            is_conflict_copy=model.is_conflict_copy,
+            conflict_origin_user_file_id=model.conflict_origin_user_file_id,
         )
 
     async def get_by_id(self, namespace_id: int) -> Optional[NamespaceEntity]:
@@ -93,7 +112,31 @@ class PgNamespaceRepository:
                 Namespace.name == name,
                 Namespace.user_id == user_id
             )
+            .order_by(Namespace.created_at.asc())
             .options(selectinload(Namespace.user_files))
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return self._to_entity(row)
+
+    async def get_by_name_and_parent(
+        self,
+        *,
+        user_id: int,
+        parent_id: Optional[int],
+        name: str,
+    ) -> Optional[NamespaceEntity]:
+        result = await self.db.execute(
+            select(Namespace)
+            .where(
+                Namespace.user_id == user_id,
+                Namespace.parent_id == parent_id,
+                Namespace.name == name,
+            )
+            .options(selectinload(Namespace.user_files))
+            .limit(1)
         )
         row = result.scalar_one_or_none()
         if row is None:
@@ -129,29 +172,78 @@ class PgNamespaceRepository:
         result = await self.db.execute(
             select(Namespace)
             .where(Namespace.user_id == user_id)
-            .order_by(Namespace.created_at.desc())
-            .options(selectinload(Namespace.user_files))
+            .order_by(Namespace.created_at.asc(), Namespace.name.asc())
+            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
         )
         namespaces = list(result.scalars().unique().all())
         return [self._to_entity(namespace) for namespace in namespaces]
 
     async def create(
-        self, name: str, user_id: int, description: Optional[str] = None
+        self,
+        name: str,
+        user_id: int,
+        parent_id: Optional[int] = None,
+        kind: str = "regular",
+        description: Optional[str] = None,
     ) -> NamespaceEntity:
         namespace = Namespace(
             user_id=user_id,
+            parent_id=parent_id,
             name=name,
+            kind=kind,
             description=description,
         )
         self.db.add(namespace)
         await self.db.flush()
         return self._to_entity(namespace, user_files=[])
 
+    async def get_children(
+        self,
+        *,
+        user_id: int,
+        parent_id: Optional[int],
+    ) -> List[NamespaceEntity]:
+        result = await self.db.execute(
+            select(Namespace)
+            .where(
+                Namespace.user_id == user_id,
+                Namespace.parent_id == parent_id,
+            )
+            .order_by(Namespace.name.asc(), Namespace.created_at.asc())
+            .options(selectinload(Namespace.user_files))
+        )
+        rows = result.scalars().unique().all()
+        return [self._to_entity(row) for row in rows]
+
+    async def get_descendant_ids(self, *, user_id: int, namespace_id: int) -> List[int]:
+        result = await self.db.execute(
+            text(
+                """
+                WITH RECURSIVE namespace_tree AS (
+                    SELECT id, parent_id
+                    FROM namespaces
+                    WHERE user_id = :user_id AND id = :namespace_id
+                    UNION ALL
+                    SELECT child.id, child.parent_id
+                    FROM namespaces child
+                    JOIN namespace_tree tree ON child.parent_id = tree.id
+                    WHERE child.user_id = :user_id
+                )
+                SELECT id
+                FROM namespace_tree
+                """
+            ),
+            {"user_id": user_id, "namespace_id": namespace_id},
+        )
+        return [row[0] for row in result.fetchall()]
+
     async def update(self, namespace: NamespaceEntity) -> NamespaceEntity:
         model = await self._get_model_by_id(namespace.id)
         if model is None:
             raise ValueError(f"Namespace id={namespace.id} not found")
         model.name = namespace.name
+        model.parent_id = namespace.parent_id
+        model.kind = namespace.kind
         model.description = namespace.description
         self.db.add(model)
         await self.db.flush()
@@ -166,3 +258,14 @@ class PgNamespaceRepository:
         if namespace:
             await self.db.delete(namespace)
         await self.db.flush()
+
+
+    async def get_namespaces_with_files(self, user_id: int) -> List[NamespaceEntity]:
+        result = await self.db.execute(
+            select(Namespace)
+            .where(Namespace.user_id == user_id)
+            .order_by(Namespace.created_at.asc(), Namespace.name.asc())
+            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
+        )
+        namespaces = result.scalars().unique().all()
+        return [self._to_entity(namespace) for namespace in namespaces]

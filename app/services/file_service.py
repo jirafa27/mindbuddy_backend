@@ -16,9 +16,10 @@ from app.domain.protocols import (
     UserFileRepository,
     SummaryRepository,
     TaskPublisher,
+    FileSyncNotifier,
 )
 from app.infrastructure.db.models import UserFile
-from app.schemas.file import FileCreated, FileProcessingResult, FileInfo, DeduplicationResult, ProcessUserLinkResult
+from app.schemas.file import FileCreated, FileProcessingResult, FileInfo, FileVersionInfo, DeduplicationResult, ProcessUserLinkResult, CommandType
 from app.core.config import settings
 from app.core.exceptions import (
     ValidationError,
@@ -48,6 +49,7 @@ class FileService:
         user_file_repository: Optional[UserFileRepository] = None,
         summary_repository: Optional[SummaryRepository] = None,
         task_publisher: Optional[TaskPublisher] = None,
+        sync_notifier: Optional[FileSyncNotifier] = None,
     ):
         """
         Args:
@@ -74,6 +76,60 @@ class FileService:
         self.db = db
         self.file_repository = file_repository
         self.user_file_repository = user_file_repository
+        self.sync_notifier = sync_notifier
+
+    async def _get_or_create_trash_namespace_id(self, user_id: int) -> int:
+        if not self.namespace_repository or not self.db:
+            raise ValidationError("Namespace repository is required")
+        trash_name = "Trash"
+        trash_kind = "trash"
+        existing = await self.namespace_repository.get_by_name_and_user(
+            name=trash_name,
+            user_id=user_id,
+        )
+        if existing and existing.parent_id is None:
+            if existing.kind != trash_kind:
+                existing.kind = trash_kind
+                updated = await self.namespace_repository.update(existing)
+                await self.db.commit()
+                return updated.id
+            return existing.id
+        namespace = await self.namespace_repository.create(
+            name=trash_name,
+            user_id=user_id,
+            parent_id=None,
+            kind=trash_kind,
+            description=None,
+        )
+        await self.db.commit()
+        return namespace.id
+
+    @staticmethod
+    def _build_file_info(user_file: Any, content_file: Any) -> FileInfo:
+        meta = (content_file.media_metadata or {}) if content_file else {}
+        transcript_text = (content_file.transcript_text or "") if content_file else ""
+        file_size = meta.get("file_size") or len(transcript_text.encode("utf-8"))
+        created_at = content_file.created_at if content_file else datetime.utcnow()
+        updated_at = getattr(user_file, "updated_at", None) or created_at
+        return FileInfo(
+            user_file_id=user_file.id,
+            content_file_id=user_file.file_id,
+            user_id=user_file.user_id,
+            namespace_id=user_file.namespace_id,
+            filename=user_file.custom_title or meta.get("title", "document"),
+            file_type=meta.get("file_type", "md"),
+            file_size=file_size,
+            created_at=created_at,
+            updated_at=updated_at,
+            file_path=content_file.file_path if content_file else None,
+            content_revision=getattr(user_file, "content_revision", 1) or 1,
+            desktop_updated_at=getattr(user_file, "desktop_updated_at", None),
+            app_updated_at=getattr(user_file, "app_updated_at", None),
+            last_update_source=getattr(user_file, "last_update_source", None),
+            content_hash=getattr(content_file, "content_hash", None),
+            vault_relative_path=getattr(user_file, "vault_relative_path", None),
+            is_conflict_copy=getattr(user_file, "is_conflict_copy", False),
+        )
 
     @staticmethod
     def sanitize_filename(filename: str) -> str:
@@ -362,14 +418,14 @@ class FileService:
         user_id: int,
     ) -> bool:
         """
-        Удаляет файл из БД и хранилища.
+        Перемещает файл пользователя в корзину.
 
         Args:
             file_id: ID файла
             user_id: ID пользователя (для проверки прав доступа)
 
         Returns:
-            True если удаление успешно
+            True если перемещение успешно
 
         Raises:
             NotFoundError: Если файл не найден
@@ -380,8 +436,16 @@ class FileService:
             raise NotFoundError(f"File with id {file_id} not found")
         if user_file.user_id != user_id:
             raise ForbiddenError("You don't have access to this file")
+        trash_namespace_id = await self._get_or_create_trash_namespace_id(user_id)
+        if user_file.namespace_id == trash_namespace_id:
+            raise ValidationError("Файл уже находится в корзине")
 
-        await self.user_file_repository.delete(user_file.id)
+        await self.user_file_repository.update_namespace(user_file.id, trash_namespace_id)
+        if self.sync_notifier:
+            await self.sync_notifier.add_trash_command_to_queue(
+                user_file_id=file_id,
+                user_id=user_id,
+            )
         await self.db.commit()
         return True
 
@@ -455,6 +519,7 @@ class FileService:
         filename: str,
         file_ext: str,
         content_hash: Optional[str] = None,
+        transcript_text: Optional[str] = None,
     ) -> UserFile:
         """
         Создаёт запись о контенте (File) и ссылку пользователя (UserFile). 
@@ -475,6 +540,7 @@ class FileService:
                 content_file = await self.file_repository.create(
                     content_hash=ch,
                     file_path=object_name,
+                    transcript_text=transcript_text,
                     media_metadata={"title": filename, "file_type": file_ext},
                     processing_status="completed",
                 )
@@ -484,6 +550,12 @@ class FileService:
                 namespace_id=namespace_id,
                 custom_title=filename,
             )
+            if self.sync_notifier:
+                await self.sync_notifier.add_upsert_command_to_queue(
+                    user_file_id=user_file.id,
+                    user_id=user_id,
+                    command_type=CommandType.UPSERT,
+                )
             await self.db.commit()
             logger.info("File created in DB: user_file_id=%s, content_file_id=%s, filename=%s", user_file.id, content_file.id, filename)
             return user_file
@@ -545,6 +617,12 @@ class FileService:
                         namespace_id=namespace_id,
                         custom_title=filename,
                     )
+                    if self.sync_notifier:
+                        await self.sync_notifier.add_upsert_command_to_queue(
+                            user_file_id=user_file.id,
+                            user_id=user_id,
+                            command_type=CommandType.UPSERT,
+                        )
                     await self.db.commit()
                     logger.info(
                         "Reused existing File, created new UserFile: user_file_id=%d, content_file_id=%d (hash=%s)",
@@ -586,6 +664,7 @@ class FileService:
             filename=filename,
             file_ext=file_ext,
             content_hash=ch,
+            transcript_text=text,
         )
 
         return FileCreated(
@@ -746,6 +825,12 @@ class FileService:
                 namespace_id=namespace_id,
                 custom_title=title,
             )
+            if self.sync_notifier:
+                await self.sync_notifier.add_upsert_command_to_queue(
+                    user_file_id=user_file.id,
+                    user_id=user_id,
+                    command_type=CommandType.UPSERT,
+                )
             await self.db.commit()
             logger.info("[FileService] Created file record: user_file_id=%d, source=%s", user_file.id, source_url)
             return user_file
@@ -858,6 +943,12 @@ class FileService:
         if existing:
             if existing.namespace_id != namespace_id:
                 await self.user_file_repository.update_namespace(existing.id, namespace_id)
+                if self.sync_notifier:
+                    await self.sync_notifier.add_upsert_command_to_queue(
+                        user_file_id=existing.id,
+                        user_id=user_id,
+                        command_type=CommandType.MOVE,
+                    )
                 await self.db.commit()
                 logger.info(
                     "[FileService] Attach: moved existing user_file=%d to namespace=%d",
@@ -874,6 +965,12 @@ class FileService:
             namespace_id=namespace_id,
             custom_title=title,
         )
+        if self.sync_notifier:
+            await self.sync_notifier.add_upsert_command_to_queue(
+                user_file_id=user_file.id,
+                user_id=user_id,
+                command_type=CommandType.UPSERT,
+            )
         await self.db.commit()
         logger.info(
             "[FileService] Attach: created user_file=%d for file=%d, namespace=%d",
@@ -921,18 +1018,26 @@ class FileService:
         content_file = await self.file_repository.get_by_id(uf.file_id)
         if not content_file:
             raise NotFoundError("Файл или путь не найден")
-        meta = content_file.media_metadata or {}
-        return FileInfo(
-            user_file_id=uf.id,
-            content_file_id=uf.file_id,
-            user_id=uf.user_id,
-            namespace_id=uf.namespace_id,
-            filename=uf.custom_title or meta.get("title", "document"),
-            file_type=meta.get("file_type", "md"),
-            file_size=0,
-            created_at=content_file.created_at,
-            updated_at=content_file.created_at,
-            file_path=content_file.file_path,
+        return self._build_file_info(uf, content_file)
+
+    async def get_file_version(
+        self,
+        file_id: int,
+        user_id: int,
+    ) -> FileVersionInfo:
+        if self.sync_notifier:
+            return await self.sync_notifier.get_file_version(file_id, user_id)  # type: ignore[return-value]
+        info = await self.get_file_info(file_id, user_id)
+        return FileVersionInfo(
+            user_file_id=info.user_file_id,
+            content_file_id=info.content_file_id,
+            content_revision=info.content_revision,
+            updated_at=info.updated_at,
+            desktop_updated_at=info.desktop_updated_at,
+            app_updated_at=info.app_updated_at,
+            last_update_source=info.last_update_source,
+            content_hash=info.content_hash,
+            vault_relative_path=info.vault_relative_path,
         )
 
     async def move_to_namespace(
@@ -972,24 +1077,44 @@ class FileService:
             raise ForbiddenError("У вас нет доступа к этому пространству")
 
         await self.user_file_repository.update_namespace(file.id, namespace_id)
+        if self.sync_notifier:
+            await self.sync_notifier.add_upsert_command_to_queue(
+                user_file_id=file.id,
+                user_id=user_id,
+                command_type=CommandType.MOVE,
+            )
         await self.db.commit()
 
         logger.info("[FileService] Moved file %d to namespace %d", file_id, namespace_id)
+        return await self.get_file_info(file_id=file.id, user_id=user_id)
 
-        content_file = await self.file_repository.get_by_id(file.file_id)
-        meta = (content_file.media_metadata or {}) if content_file else {}
-        return FileInfo(
-            user_file_id=file.id,
-            content_file_id=file.file_id,
-            user_id=file.user_id,
-            namespace_id=namespace_id,
-            filename=file.custom_title or meta.get("title", "document"),
-            file_type=meta.get("file_type", "md"),
-            file_size=0,
-            created_at=content_file.created_at if content_file else datetime.utcnow(),
-            updated_at=content_file.created_at if content_file else datetime.utcnow(),
-            file_path=content_file.file_path if content_file else None,
-        )
+    async def rename_file(
+        self,
+        file_id: int,
+        user_id: int,
+        new_title: str,
+    ) -> FileInfo:
+        if not self.user_file_repository or not self.db:
+            raise ValidationError("user_file_repository required")
+        if self.sync_notifier:
+            await self.sync_notifier.add_rename_command_to_queue(
+                user_file_id=file_id,
+                user_id=user_id,
+                new_title=new_title,
+            )
+
+        user_file = await self.user_file_repository.get_by_id(file_id)
+        if not user_file:
+            logger.error(f"Файл с id {file_id} не найден")
+            await self.db.rollback()
+            raise NotFoundError(f"Файл с id {file_id} не найден")
+        if user_file.user_id != user_id:
+            logger.error(f"У вас нет доступа к этому файлу: {file_id}")
+            await self.db.rollback()
+            raise ForbiddenError("У вас нет доступа к этому файлу")
+        await self.user_file_repository.update_custom_title(file_id, new_title)
+        await self.db.commit()
+        return await self.get_file_info(file_id=file_id, user_id=user_id)
 
     async def replace_file_content(
         self,
@@ -998,6 +1123,8 @@ class FileService:
         file_content: bytes,
         filename: str,
         *,
+        base_revision: Optional[int] = None,
+        force_overwrite: bool = False,
         summary_repository: Optional[SummaryRepository] = None,
         task_publisher: Optional[TaskPublisher] = None,
     ) -> FileInfo:
@@ -1013,6 +1140,14 @@ class FileService:
         """
         if not self.file_repository or not self.user_file_repository:
             raise ValidationError("file_repository and user_file_repository required")
+
+        if self.sync_notifier:
+            await self.sync_notifier.assert_can_save(
+                user_file_id=file_id,
+                user_id=user_id,
+                base_hash=base_revision,
+                force_overwrite=force_overwrite,
+            )
 
         user_file = await self.user_file_repository.get_by_id(file_id)
         if not user_file:
@@ -1070,6 +1205,7 @@ class FileService:
             new_file = await self.file_repository.create(
                 content_hash=new_hash,
                 file_path=new_object_name,
+                transcript_text=text,
                 media_metadata=updated_meta,
                 processing_status="pending",
             )
@@ -1092,20 +1228,14 @@ class FileService:
                 )
                 logger.info("[FileService] COW: sent embeddings task for new file %d", new_file.id)
 
+            if self.sync_notifier:
+                await self.sync_notifier.add_upsert_command_to_queue(
+                    user_file_id=user_file.id,
+                    user_id=user_id,
+                    command_type=CommandType.UPSERT,
+                )
             await self.db.commit()
-
-            return FileInfo(
-                user_file_id=user_file.id,
-                content_file_id=new_file.id,
-                user_id=user_id,
-                namespace_id=user_file.namespace_id,
-                filename=filename,
-                file_type=self._get_content_type(file_ext),
-                file_size=len(file_content),
-                created_at=new_file.created_at,
-                updated_at=datetime.utcnow(),
-                file_path=new_object_name,
-            )
+            return await self.get_file_info(file_id=file_id, user_id=user_id)
 
         # --- Стандартный путь: единственный владелец, edit in-place ---
         await self.storage.upload_file(
@@ -1119,6 +1249,7 @@ class FileService:
             file_id=content_file.id,
             content_hash=new_hash,
             media_metadata=updated_meta,
+            transcript_text=text,
         )
 
         if self.db:
@@ -1146,18 +1277,11 @@ class FileService:
             )
             logger.info("[FileService] Sent embeddings task for replaced file %d", file_id)
 
+        if self.sync_notifier:
+            await self.sync_notifier.add_upsert_command_to_queue(
+                user_file_id=user_file.id,
+                user_id=user_id,
+                command_type=CommandType.UPSERT,
+            )
         await self.db.commit()
-
-        updated_at = datetime.utcnow()
-        return FileInfo(
-            user_file_id=user_file.id,
-            content_file_id=content_file.id,
-            user_id=user_id,
-            namespace_id=user_file.namespace_id,
-            filename=filename,
-            file_type=self._get_content_type(file_ext),
-            file_size=len(file_content),
-            created_at=content_file.created_at,
-            updated_at=updated_at,
-            file_path=content_file.file_path,
-        )
+        return await self.get_file_info(file_id=file_id, user_id=user_id)

@@ -4,12 +4,15 @@ import secrets
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.protocols import UserRepository, NamespaceRepository
-from app.core.exceptions import ValidationError, NotFoundError
+from app.core.exceptions import ValidationError, NotFoundError, UnauthorizedError
 from app.schemas.user import UserResponse
 from app.core.security import hash_password, verify_password
 
 
 INBOX_NAMESPACE_NAME = "Inbox"
+INBOX_NAMESPACE_KIND = "inbox"
+TRASH_NAMESPACE_NAME = "Trash"
+TRASH_NAMESPACE_KIND = "trash"
 
 
 def _entity_to_response(user) -> UserResponse:
@@ -58,6 +61,7 @@ class UserService:
         await self.db.commit()
         if self.namespace_repository:
             await self._ensure_inbox_for_user(user.id)
+            await self._ensure_trash_for_user(user.id)
         return _entity_to_response(user)
 
     async def get_user(
@@ -87,10 +91,10 @@ class UserService:
         self,
         token: str,
     ) -> UserResponse:
-        """Пользователь по токену Desktop Watcher. NotFoundError если не найден."""
+        """Пользователь по токену Desktop Watcher. UnauthorizedError если не найден."""
         user = await self.repository.get_by_watcher_token(token)
         if not user:
-            raise NotFoundError("Недействительный токен Desktop Watcher")
+            raise UnauthorizedError("Недействительный токен Desktop Watcher")
         return _entity_to_response(user)
 
     async def _ensure_inbox_for_user(self, user_id: int) -> None:
@@ -99,11 +103,35 @@ class UserService:
             name=INBOX_NAMESPACE_NAME,
             user_id=user_id,
         )
-        if existing:
+        if existing and existing.kind == INBOX_NAMESPACE_KIND and existing.parent_id is None:
             return
         await self.namespace_repository.create(
             name=INBOX_NAMESPACE_NAME,
             user_id=user_id,
+            parent_id=None,
+            kind=INBOX_NAMESPACE_KIND,
+            description=None,
+        )
+        await self.db.commit()
+
+    async def _ensure_trash_for_user(self, user_id: int) -> None:
+        """Создаёт пространство Trash для пользователя, если его ещё нет."""
+        existing = await self.namespace_repository.get_by_name_and_user(
+            name=TRASH_NAMESPACE_NAME,
+            user_id=user_id,
+        )
+        if existing and existing.parent_id is None:
+            if existing.kind == TRASH_NAMESPACE_KIND:
+                return
+            existing.kind = TRASH_NAMESPACE_KIND
+            await self.namespace_repository.update(existing)
+            await self.db.commit()
+            return
+        await self.namespace_repository.create(
+            name=TRASH_NAMESPACE_NAME,
+            user_id=user_id,
+            parent_id=None,
+            kind=TRASH_NAMESPACE_KIND,
             description=None,
         )
         await self.db.commit()

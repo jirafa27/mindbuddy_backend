@@ -94,7 +94,7 @@ class RouterNode:
 
     async def run(self, state: AskState, config: RunnableConfig) -> AskState:
         question = state.get("question", "").strip()
-        file_content = state.get("file_content")
+        has_file = bool(state.get("attached_files"))
         history = state.get("history") or []
         override_intent = state.get("override_intent")
         user_id = state.get("user_id")
@@ -116,7 +116,7 @@ class RouterNode:
 
         if override_intent:
             return await self._handle_override(
-                state, override_intent, effective_detected_url, history_file_id, file_content,
+                state, override_intent, effective_detected_url, history_file_id, has_file,
             )
 
         # Fast path: только URL без текста → index_url
@@ -139,7 +139,7 @@ class RouterNode:
             }
 
         # Fast path: файл без вопроса → save_file
-        if file_content and not question:
+        if has_file and not question:
             logger.info("[Router] Fast path: save_file (file, no question)")
             namespace_id, ns_hint = await self._inbox_namespace_if_unset(
                 None, None, config, user_id
@@ -159,7 +159,7 @@ class RouterNode:
             }
 
         # Fast path: файл + вопрос → сначала save_file в Inbox, затем rag_query по этому файлу
-        if file_content and question:
+        if has_file and question:
             logger.info("[Router] Fast path: save_file + rag_query (file with question)")
             namespace_id, ns_hint = await self._inbox_namespace_if_unset(
                 None, None, config, user_id
@@ -204,11 +204,11 @@ class RouterNode:
         intent: str,
         detected_url: Optional[str],
         history_file_id: Optional[int],
-        file_content: Optional[bytes],
+        has_file: bool,
     ) -> AskState:
         logger.info("[Router] Override mode: intent=%s", intent)
 
-        if intent == IntentType.SUMMARIZE and not detected_url and not file_content and not history_file_id:
+        if intent == IntentType.SUMMARIZE and not detected_url and not has_file and not history_file_id:
             return {
                 **state,
                 "intent": IntentType.RAG_QUERY,
@@ -228,7 +228,7 @@ class RouterNode:
                 ],
             }
 
-        if intent == IntentType.SAVE_FILE and not file_content:
+        if intent == IntentType.SAVE_FILE and not has_file:
             return {
                 **state,
                 "intent": IntentType.RAG_QUERY,

@@ -23,24 +23,40 @@ _MIN_VECTOR_RELEVANCE = 0.55
 # Максимальное количество файлов, возвращаемых за один запрос
 SEND_FILE_LIMIT = 10
 
-# Базовый SQL для поиска файла по имени (ILIKE)
-# uf.id — это user_files.id, именно его ожидает file_service.download_file()
-_FIND_FILE_BY_NAME_SQL = """
-SELECT uf.id AS file_id,
-       COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename
-FROM user_files uf
-JOIN files f ON f.id = uf.file_id
-WHERE uf.user_id = :user_id
-  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id = :namespace_id)
+_SCOPED_NAMESPACES_CTE = """
+WITH RECURSIVE scoped_namespaces AS (
+SELECT id
+FROM namespaces
+WHERE user_id = :user_id
+  AND id = CAST(:namespace_id AS integer)
+UNION ALL
+SELECT child.id
+FROM namespaces child
+JOIN scoped_namespaces scoped ON child.parent_id = scoped.id
+WHERE child.user_id = :user_id
+)
 """
 
-_LIST_ALL_IN_NAMESPACE_SQL = """
+# Базовый SQL для поиска файла по имени (ILIKE)
+# uf.id — это user_files.id, именно его ожидает file_service.download_file()
+_FIND_FILE_BY_NAME_SQL = f"""
+{_SCOPED_NAMESPACES_CTE}
 SELECT uf.id AS file_id,
        COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename
 FROM user_files uf
 JOIN files f ON f.id = uf.file_id
 WHERE uf.user_id = :user_id
-  AND uf.namespace_id = :namespace_id
+  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id IN (SELECT id FROM scoped_namespaces))
+"""
+
+_LIST_ALL_IN_NAMESPACE_SQL = f"""
+{_SCOPED_NAMESPACES_CTE}
+SELECT uf.id AS file_id,
+       COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename
+FROM user_files uf
+JOIN files f ON f.id = uf.file_id
+WHERE uf.user_id = :user_id
+  AND uf.namespace_id IN (SELECT id FROM scoped_namespaces)
 ORDER BY uf.created_at DESC
 LIMIT :limit
 """

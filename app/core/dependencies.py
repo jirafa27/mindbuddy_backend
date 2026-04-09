@@ -1,5 +1,7 @@
 from functools import lru_cache
-from fastapi import Depends, Query, HTTPException, status
+from typing import Optional
+
+from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -18,6 +20,7 @@ from app.domain.protocols import (
     SummaryRepository,
     LLMProvider,
     ChatRepository,
+    SyncRepository,
 )
 from app.infrastructure.db.session import get_db
 from app.schemas.user import UserResponse
@@ -28,6 +31,7 @@ from app.infrastructure.repositories import (
     PgUserRepository,
     PgSummaryRepository,
     PgChatRepository,
+    PgSyncRepository,
 )
 from app.infrastructure.repositories.vector_embedding_repository import PgVectorRepository
 from app.services.text_chunker import TextChunkerService
@@ -48,6 +52,7 @@ from app.services.summary_service import SummaryService
 from app.graph.nodes.summary_agent import SummaryAgent
 from app.infrastructure.workers.celery_app import celery_app
 from app.infrastructure.workers.task_manager import TaskManager
+from app.services.sync_service import SyncService
 
 
 
@@ -145,6 +150,52 @@ def get_task_publisher() -> TaskPublisher:
     return TaskManager(celery_app)
 
 
+def get_sync_repository(db: AsyncSession = Depends(get_db)) -> SyncRepository:
+    """Провайдер для SyncRepository. Возвращает протокол, создаёт Pg-реализацию."""
+    return PgSyncRepository(db)
+
+
+
+def get_namespace_service(
+    db: AsyncSession = Depends(get_db),
+    namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
+    user_file_repository: UserFileRepository = Depends(get_user_file_repository),
+    sync_notifier: SyncService = Depends(get_sync_service),
+) -> NamespaceService:
+    """Провайдер для NamespaceService"""
+    return NamespaceService(
+        namespace_repository,
+        db,
+        user_file_repository=user_file_repository,
+        sync_notifier=sync_notifier,
+    )
+
+def get_sync_service(
+    storage: FileStorage = Depends(get_storage_service),
+    user_file_repository: UserFileRepository = Depends(get_user_file_repository),
+    file_repository: FileRepository = Depends(get_file_repository),
+    namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
+    vector_repository: VectorRepository = Depends(get_vector_repository),
+    summary_repository: SummaryRepository = Depends(get_summary_repository),
+    sync_repository: SyncRepository = Depends(get_sync_repository),
+    task_publisher: TaskPublisher = Depends(get_task_publisher),
+    file_reader_factory: FileReaderFactory = Depends(get_file_reader_factory),
+    db: AsyncSession = Depends(get_db),
+) -> SyncService:
+    return SyncService(
+        db=db,
+        storage=storage,
+        file_repository=file_repository,
+        user_file_repository=user_file_repository,
+        namespace_repository=namespace_repository,
+        sync_repository=sync_repository,
+        vector_repository=vector_repository,
+        summary_repository=summary_repository,
+        task_publisher=task_publisher,
+        file_reader_factory=file_reader_factory,
+    )
+
+
 def get_file_service(
     storage: FileStorage = Depends(get_storage_service),
     user_file_repository: UserFileRepository = Depends(get_user_file_repository),
@@ -156,6 +207,7 @@ def get_file_service(
     namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
     summary_repository: SummaryRepository = Depends(get_summary_repository),
     task_publisher: TaskPublisher = Depends(get_task_publisher),
+    sync_notifier: SyncService = Depends(get_sync_service),
     db: AsyncSession = Depends(get_db),
 ) -> FileService:
     return FileService(
@@ -169,6 +221,7 @@ def get_file_service(
         namespace_repository=namespace_repository,
         summary_repository=summary_repository,
         task_publisher=task_publisher,
+        sync_notifier=sync_notifier,
         db=db,
     )
 
@@ -199,12 +252,7 @@ def get_user_service(
     return UserService(repository, db, namespace_repository)
 
 
-def get_namespace_service(
-    db: AsyncSession = Depends(get_db),
-    namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
-) -> NamespaceService:
-    """Провайдер для NamespaceService"""
-    return NamespaceService(namespace_repository, db)
+
 
 
 async def get_current_user(
@@ -229,10 +277,36 @@ async def get_current_user(
 
 
 async def get_user_by_watcher_token(
-    token: str = Query(..., description="Токен аутентификации Watcher"),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=True)),
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
-    """Dependency: пользователь по Watcher токену (UserResponse). NotFoundError если не найден."""
+    """Пользователь по watcher-токену: заголовок Authorization: Bearer <watcher_token>."""
+    return await user_service.get_user_by_watcher_token(credentials.credentials)
+
+
+async def get_current_user_or_watcher(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+    user_service: UserService = Depends(get_user_service),
+) -> UserResponse:
+    """
+    JWT (веб/клиент) или токен Desktop Watcher — только заголовок Authorization: Bearer <token>.
+    Сначала пробуем JWT; если не подошёл — ищем пользователя по watcher_token.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Требуется заголовок Authorization: Bearer <token>",
+        )
+    token = credentials.credentials
+    user_id = decode_access_token(token)
+    if user_id is not None:
+        user = await user_service.get_user(user_id)
+        if user:
+            return user
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Пользователь не найден",
+        )
     return await user_service.get_user_by_watcher_token(token)
 
 

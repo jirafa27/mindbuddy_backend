@@ -4,6 +4,7 @@ from app.infrastructure.repositories.namespace_repository import PgNamespaceRepo
 from app.infrastructure.repositories.summary_repository import PgSummaryRepository
 from app.infrastructure.repositories.file_repository import PgFileRepository
 from app.infrastructure.repositories.chat_repository import PgChatRepository
+from app.infrastructure.repositories.sync_repository import PgSyncRepository
 
 __all__ = [
     "PgUserRepository",
@@ -12,4 +13,5 @@ __all__ = [
     "PgFileRepository",
     "PgUserFileRepository",
     "PgChatRepository",
+    "PgSyncRepository",
 ]

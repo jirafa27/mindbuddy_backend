@@ -11,6 +11,7 @@ from app.domain.entities import (
     SummaryEntity,
     ChatEntity,
     ChatMessageEntity,
+    SyncCommandEntity,
 )
 
 
@@ -127,6 +128,7 @@ class FileRepository(Protocol):
         *,
         content_hash: str,
         media_metadata: Optional[dict] = None,
+        transcript_text: Optional[str] = None,
     ) -> Optional[FileEntity]:
         """Обновляет content_hash и media_metadata файла."""
         ...
@@ -148,7 +150,7 @@ class UserFileRepository(Protocol):
     async def create(self, user_file: UserFileEntity) -> UserFileEntity:
         ...
 
-    async def delete(self, user_file: UserFileEntity) -> None:
+    async def delete(self, user_file_id: int) -> None:
         ...
 
     async def update_namespace(self, user_file_id: int, namespace_id: Optional[int] = None) -> Optional[UserFileEntity]:
@@ -207,15 +209,30 @@ class NamespaceRepository(Protocol):
     async def get_by_name_and_user(self, name: str, user_id: int) -> Optional[NamespaceEntity]:
         ...
 
+    async def get_by_name_and_parent(
+        self, *, user_id: int, parent_id: Optional[int], name: str
+    ) -> Optional[NamespaceEntity]:
+        ...
+
     async def create(
         self,
         name: str,
         user_id: int,
+        parent_id: Optional[int] = None,
+        kind: str = "regular",
         description: Optional[str] = None,
     ) -> NamespaceEntity:
         ...
 
     async def get_by_user_with_files(self, user_id: int) -> List[NamespaceEntity]:
+        ...
+
+    async def get_children(
+        self, *, user_id: int, parent_id: Optional[int]
+    ) -> List[NamespaceEntity]:
+        ...
+
+    async def get_descendant_ids(self, *, user_id: int, namespace_id: int) -> List[int]:
         ...
 
     async def update(self, namespace: NamespaceEntity) -> NamespaceEntity:
@@ -322,6 +339,10 @@ class ChatRepository(Protocol):
         """Очистить отложенное действие чата."""
         ...
 
+    async def update_context(self, chat_id: int, context: Dict[str, Any]) -> None:
+        """Обновить персистентный контекст диалога (ConversationContext)."""
+        ...
+
 
 class SummaryRepository(Protocol):
     """Протокол репозитория суммаризаций."""
@@ -376,6 +397,99 @@ class TaskPublisher(Protocol):
         namespace_id: Optional[int] = None,
     ) -> Optional[str]:
         """Постановка задачи на массовое редактирование файлов. Возвращает task_id или None."""
+        ...
+
+
+class SyncRepository(Protocol):
+    """
+    Репозиторий команд синхронизации
+    """
+
+    async def create_command(
+        self,
+        *,
+        user_id: int,
+        user_file_id: int,
+        command_type: str,
+        payload_json: dict,
+        status: str = "pending",
+    ) -> SyncCommandEntity:
+        ...
+
+    async def get_pending_commands(
+        self, user_id: int, limit: int = 100
+    ) -> List[SyncCommandEntity]:
+        ...
+
+    async def get_command(
+        self, command_id: int, user_id: int
+    ) -> Optional[SyncCommandEntity]:
+        ...
+
+    async def ack_command(
+        self, command_id: int, user_id: int, status: str
+    ) -> Optional[SyncCommandEntity]:
+        ...
+
+    async def get_namespaces_with_files(self, user_id: int) -> List[Any]:
+        ...
+
+
+class FileSyncNotifier(Protocol):
+    """Протокол для уведомления подсистемы синхронизации об изменениях файлов.
+    Позволяет FileService / NamespaceService создавать sync-команды,
+    не зная о конкретной реализации (SyncService)."""
+
+    async def add_upsert_command_to_queue(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+        command_type: Any = None,
+        vault_relative_path: Optional[str] = None,
+    ) -> Any:
+        """Добавляет команду на обновление файла в очередь синхронизации."""
+        ...
+
+    async def add_trash_command_to_queue(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+    ) -> None:
+        """Добавляет команду на перемещение файла в корзину в очередь синхронизации."""
+        ...
+
+
+    async def add_rename_command_to_queue(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+        new_title: str,
+    ) -> Any:
+        """Добавляет команду на переименование файла в очередь синхронизации."""
+        ...
+
+    async def get_file_version(
+        self,
+        user_file_id: int,
+        user_id: int,
+    ) -> Any:
+        """Получает версию файла."""
+        ...
+
+    async def assert_can_save(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+        base_hash: Optional[str] = None,
+        force_overwrite: bool = False,
+    ) -> None:
+        """
+        Проверяет, был ли файл изменен после открытия редактора
+        """
         ...
 
 

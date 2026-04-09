@@ -9,7 +9,9 @@ from app.core.exceptions import (
     AppException,
     ValidationError,
     NotFoundError,
+    UnauthorizedError,
     ForbiddenError,
+    ConflictError,
     FileTooLargeError,
     EmbeddingGenerationError,
     FileProcessingError,
@@ -21,7 +23,9 @@ logger = logging.getLogger(__name__)
 EXCEPTION_STATUS_MAP = {
     ValidationError: status.HTTP_400_BAD_REQUEST,
     NotFoundError: status.HTTP_404_NOT_FOUND,
+    UnauthorizedError: status.HTTP_401_UNAUTHORIZED,
     ForbiddenError: status.HTTP_403_FORBIDDEN,
+    ConflictError: status.HTTP_409_CONFLICT,
     FileTooLargeError: status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     EmbeddingGenerationError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     FileProcessingError: status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -37,7 +41,8 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
     )
     log_level = logger.warning if 400 <= status_code < 500 else logger.error
     log_level("%s: %s", exception_type.__name__, exc.message)
-    return JSONResponse(status_code=status_code, content={"detail": exc.message})
+    detail = getattr(exc, "payload", None) or exc.message
+    return JSONResponse(status_code=status_code, content={"detail": detail})
 
 
 def _sanitize_validation_errors(errors: list) -> list:

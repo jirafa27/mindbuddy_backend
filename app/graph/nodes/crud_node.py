@@ -368,7 +368,12 @@ class CrudNode:
                     text = (msg.get("text") or "").strip()
                     # Берём первое непустое сообщение ассистента длиннее 100 символов
                     if len(text) > 100:
-                        content = text
+                        # Убираем служебный префикс "Содержимое ... сохранено в пространство «...»."
+                        content = re.sub(
+                            r"^_[^_\n]{0,120}сохранено? в пространство «[^»]+»\._\s*\n+",
+                            "",
+                            text,
+                        )
                         break
 
         if not content:
@@ -487,6 +492,46 @@ class CrudNode:
         search_query = state.get("search_query") or state.get("entity_name")
         namespace_id = state.get("namespace_id")
         namespace_name = state.get("namespace_name_hint")
+
+        # Явно прикреплённые file_ids (из query-параметра) — удаляем именно их
+        explicit_file_ids = state.get("search_file_ids") or []
+        if explicit_file_ids and not search_query:
+            if len(explicit_file_ids) == 1:
+                fid = explicit_file_ids[0]
+                filename = await self._get_filename(config, fid, user_id)
+                display = f"«{filename}»" if filename else f"(id={fid})"
+                pending = {
+                    "type": "delete_file",
+                    "params": {"file_id": fid},
+                    "target": f"файл {display}",
+                }
+                return {
+                    "answer": (
+                        f"Вы уверены, что хотите удалить {display}? "
+                        "Это действие нельзя отменить. Напишите «да» для подтверждения."
+                    ),
+                    "pending_action": pending,
+                    "agent_steps": agent_steps,
+                }
+
+            filenames = []
+            for fid in explicit_file_ids:
+                fn = await self._get_filename(config, fid, user_id)
+                filenames.append(fn or f"id={fid}")
+            names_str = ", ".join(f"«{n}»" for n in filenames)
+            pending = {
+                "type": "delete_all_in_namespace",
+                "params": {"file_ids": list(explicit_file_ids)},
+                "target": f"файлы {names_str}",
+            }
+            return {
+                "answer": (
+                    f"Вы уверены, что хотите удалить {names_str}? "
+                    "Это действие нельзя отменить. Напишите «да» для подтверждения."
+                ),
+                "pending_action": pending,
+                "agent_steps": agent_steps,
+            }
 
         # Если задан namespace без конкретного файла — режим namespace, игнорируем history_file_id
         if namespace_id and not search_query:
@@ -632,7 +677,11 @@ class CrudNode:
                         "answer": f"Недопустимое имя: «{raw_title}».",
                         "agent_steps": agent_steps,
                     }
-                await user_file_repository.update_custom_title(fid, safe)
+                await self.file_service.rename_file(
+                    file_id=fid,
+                    user_id=user_id,
+                    new_title=safe,
+                )
                 done.append(safe)
             return {
                 "answer": "Переименовано: " + ", ".join(f"«{n}»" for n in done) + ".",
@@ -678,7 +727,11 @@ class CrudNode:
         if not uf or uf.user_id != user_id:
             return {"answer": "Файл не найден или нет доступа.", "agent_steps": agent_steps}
 
-        await user_file_repository.update_custom_title(file_id, safe_new)
+        await self.file_service.rename_file(
+            file_id=file_id,
+            user_id=user_id,
+            new_title=safe_new,
+        )
         return {
             "answer": f"Файл переименован в «{safe_new}».",
             "agent_steps": agent_steps,

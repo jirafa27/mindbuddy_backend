@@ -2,7 +2,22 @@
    Search: vector_embeddings -> files -> user_files (фильтр по user_id, опционально namespace).
 """
 
-VECTOR_SEARCH_SQL = """
+SCOPED_NAMESPACES_CTE = """
+WITH RECURSIVE scoped_namespaces AS (
+    SELECT id
+    FROM namespaces
+    WHERE user_id = :user_id
+      AND id = CAST(:namespace_id AS integer)
+    UNION ALL
+    SELECT child.id
+    FROM namespaces child
+    JOIN scoped_namespaces scoped ON child.parent_id = scoped.id
+    WHERE child.user_id = :user_id
+)
+"""
+
+VECTOR_SEARCH_SQL = f"""
+{SCOPED_NAMESPACES_CTE}
 SELECT ve.chunk_text,
        COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
        1 - (ve.embedding <=> CAST(:query_embedding AS vector)) AS relevance
@@ -10,7 +25,14 @@ FROM vector_embeddings ve
 JOIN files f ON f.id = ve.file_id
 JOIN user_files uf ON uf.file_id = ve.file_id
 WHERE uf.user_id = :user_id
-  AND (:namespace_id::integer IS NULL OR uf.namespace_id = :namespace_id)
+  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id IN (SELECT id FROM scoped_namespaces))
+  AND (
+      CAST(:namespace_id AS integer) IS NOT NULL
+      OR NOT EXISTS (
+          SELECT 1 FROM namespaces tn
+          WHERE tn.id = uf.namespace_id AND tn.kind = 'trash'
+      )
+  )
 ORDER BY ve.embedding <=> CAST(:query_embedding AS vector)
 LIMIT :limit
 """
@@ -42,7 +64,8 @@ ORDER BY ve.embedding <=> CAST(:query_embedding AS vector)
 LIMIT :limit
 """
 
-LIST_FILES_SQL = """
+LIST_FILES_SQL = f"""
+{SCOPED_NAMESPACES_CTE}
 SELECT COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
        n.name AS namespace_name,
        TO_CHAR(uf.created_at, 'DD.MM.YYYY') AS created_at
@@ -50,18 +73,33 @@ FROM user_files uf
 JOIN files f ON f.id = uf.file_id
 LEFT JOIN namespaces n ON n.id = uf.namespace_id
 WHERE uf.user_id = :user_id
-  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id = :namespace_id)
+  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id IN (SELECT id FROM scoped_namespaces))
+  AND (
+      CAST(:namespace_id AS integer) IS NOT NULL
+      OR NOT EXISTS (
+          SELECT 1 FROM namespaces tn
+          WHERE tn.id = uf.namespace_id AND tn.kind = 'trash'
+      )
+  )
 ORDER BY uf.created_at DESC
 LIMIT :limit
 """
 
-FIND_FILE_SQL = """
+FIND_FILE_SQL = f"""
+{SCOPED_NAMESPACES_CTE}
 SELECT uf.id AS file_id,
        COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename
 FROM user_files uf
 JOIN files f ON f.id = uf.file_id
 WHERE uf.user_id = :user_id
-  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id = :namespace_id)
+  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id IN (SELECT id FROM scoped_namespaces))
+  AND (
+      CAST(:namespace_id AS integer) IS NOT NULL
+      OR NOT EXISTS (
+          SELECT 1 FROM namespaces tn
+          WHERE tn.id = uf.namespace_id AND tn.kind = 'trash'
+      )
+  )
   AND LOWER(COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, '')) ILIKE LOWER(:filename_pattern)
 ORDER BY uf.created_at DESC
 LIMIT 1
@@ -76,8 +114,9 @@ LIMIT 1
 # - rn_snippet: ранжирование для сниппета — чанки содержащие ключевое слово
 #   (ILIKE :kw_pattern) идут первыми, остальные сортируются по расстоянию.
 #   Так LLM-реранкинг видит тематически релевантный текст, а не только заголовки.
-FIND_FILE_BY_TOPIC_SQL = """
-WITH one_user_file AS (
+FIND_FILE_BY_TOPIC_SQL = f"""
+{SCOPED_NAMESPACES_CTE},
+one_user_file AS (
   SELECT DISTINCT ON (file_id)
          id                                                           AS user_file_id,
          file_id,
@@ -88,7 +127,14 @@ WITH one_user_file AS (
                   'Document')                                         AS filename
   FROM user_files
   WHERE user_id = :user_id
-    AND (CAST(:namespace_id AS integer) IS NULL OR namespace_id = :namespace_id)
+    AND (CAST(:namespace_id AS integer) IS NULL OR namespace_id IN (SELECT id FROM scoped_namespaces))
+    AND (
+        CAST(:namespace_id AS integer) IS NOT NULL
+        OR NOT EXISTS (
+            SELECT 1 FROM namespaces tn
+            WHERE tn.id = user_files.namespace_id AND tn.kind = 'trash'
+        )
+    )
   ORDER BY file_id, id
 ),
 chunks AS (
@@ -186,8 +232,9 @@ LIMIT :limit
 
 # Гибридный поиск по всем файлам пользователя (без фильтра по user_files.id).
 # Параметры: :query_embedding, :fts_query, :user_id, :namespace_id, :limit.
-HYBRID_SEARCH_SQL = """
-WITH fts_matches AS (
+HYBRID_SEARCH_SQL = f"""
+{SCOPED_NAMESPACES_CTE},
+fts_matches AS (
     SELECT ve.id AS ve_id,
            ve.chunk_text,
            COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
@@ -198,7 +245,14 @@ WITH fts_matches AS (
     JOIN files f ON f.id = ve.file_id
     JOIN user_files uf ON uf.file_id = ve.file_id
     WHERE uf.user_id = :user_id
-      AND (:namespace_id::integer IS NULL OR uf.namespace_id = :namespace_id)
+      AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id IN (SELECT id FROM scoped_namespaces))
+      AND (
+          CAST(:namespace_id AS integer) IS NOT NULL
+          OR NOT EXISTS (
+              SELECT 1 FROM namespaces tn
+              WHERE tn.id = uf.namespace_id AND tn.kind = 'trash'
+          )
+      )
       AND to_tsvector('russian', ve.chunk_text) @@ plainto_tsquery('russian', :fts_query)
 ),
 vector_top AS (
@@ -211,7 +265,14 @@ vector_top AS (
     JOIN files f ON f.id = ve.file_id
     JOIN user_files uf ON uf.file_id = ve.file_id
     WHERE uf.user_id = :user_id
-      AND (:namespace_id::integer IS NULL OR uf.namespace_id = :namespace_id)
+      AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id IN (SELECT id FROM scoped_namespaces))
+      AND (
+          CAST(:namespace_id AS integer) IS NOT NULL
+          OR NOT EXISTS (
+              SELECT 1 FROM namespaces tn
+              WHERE tn.id = uf.namespace_id AND tn.kind = 'trash'
+          )
+      )
     ORDER BY ve.embedding <=> CAST(:query_embedding AS vector)
     LIMIT 30
 ),
@@ -236,7 +297,8 @@ LIMIT :limit
 
 # Поиск файла по буквальному вхождению текста в чанки (ILIKE).
 # Возвращает файл с наибольшим количеством совпадающих чанков.
-FIND_FILE_BY_CONTENT_SQL = """
+FIND_FILE_BY_CONTENT_SQL = f"""
+{SCOPED_NAMESPACES_CTE}
 SELECT uf.id AS file_id,
        COALESCE(uf.custom_title, f.media_metadata->>'title', f.source_url, f.file_path, 'Document') AS filename,
        COUNT(*) AS match_count
@@ -244,7 +306,14 @@ FROM vector_embeddings ve
 JOIN files f ON f.id = ve.file_id
 JOIN user_files uf ON uf.file_id = ve.file_id
 WHERE uf.user_id = :user_id
-  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id = :namespace_id)
+  AND (CAST(:namespace_id AS integer) IS NULL OR uf.namespace_id IN (SELECT id FROM scoped_namespaces))
+  AND (
+      CAST(:namespace_id AS integer) IS NOT NULL
+      OR NOT EXISTS (
+          SELECT 1 FROM namespaces tn
+          WHERE tn.id = uf.namespace_id AND tn.kind = 'trash'
+      )
+  )
   AND LOWER(ve.chunk_text) LIKE LOWER(:content_pattern)
 GROUP BY uf.id, filename
 ORDER BY match_count DESC

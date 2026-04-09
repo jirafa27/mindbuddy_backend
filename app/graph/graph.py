@@ -109,7 +109,7 @@ def _route_after_save_file(state: AskState) -> str:
     После SaveFileNode:
     - ошибка → mind_buddy_agent
     - файл сохранён + есть pending rag_query (file_save_notice) → compute_query_embedding
-    - файл сохранён без вопроса (answer) → END
+    - файл сохранён (answer) → END
     - иначе → mind_buddy_agent (ошибка)
     """
     if state.get("db_error"):
@@ -170,7 +170,7 @@ def build_ask_graph(
         content_extractor=content_extractor,
     )
 
-    summary_node = SummaryNode()
+    summary_node = SummaryNode(blob_storage=blob_storage)
 
     index_url_node: Optional[IndexUrlNode] = None
     if content_extractor and task_publisher:

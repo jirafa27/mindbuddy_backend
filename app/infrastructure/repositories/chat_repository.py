@@ -18,6 +18,7 @@ class PgChatRepository:
             user_id=model.user_id,
             name=model.name,
             pending_action=model.pending_action,
+            context=model.context,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
@@ -197,5 +198,16 @@ class PgChatRepository:
         chat = result.scalar_one_or_none()
         if chat is not None:
             chat.pending_action = None
+            self.db.add(chat)
+            await self.db.flush()
+
+    async def update_context(self, chat_id: int, context: Dict[str, Any]) -> None:
+        """Обновить персистентный контекст диалога."""
+        result = await self.db.execute(
+            select(Chat).where(Chat.id == chat_id)
+        )
+        chat = result.scalar_one_or_none()
+        if chat is not None:
+            chat.context = context
             self.db.add(chat)
             await self.db.flush()

@@ -1,6 +1,6 @@
 from typing import Optional, Sequence
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.db.models import UserFile, File
@@ -18,6 +18,14 @@ class PgUserFileRepository:
             file_id=model.file_id,
             namespace_id=model.namespace_id,
             custom_title=model.custom_title,
+            vault_relative_path=model.vault_relative_path,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+            desktop_updated_at=model.desktop_updated_at,
+            app_updated_at=model.app_updated_at,
+            last_update_source=model.last_update_source,
+            is_conflict_copy=model.is_conflict_copy,
+            conflict_origin_user_file_id=model.conflict_origin_user_file_id,
         )
 
     async def get_by_id(self, user_file_id: int) -> Optional[UserFileEntity]:
@@ -30,11 +38,28 @@ class PgUserFileRepository:
     async def list_ids_by_user_and_namespace(
         self, user_id: int, namespace_id: int
     ) -> Sequence[int]:
-        """user_files.id пользователя в пространстве, по возрастанию created_at."""
+        """user_files.id пользователя в пространстве и всех его потомках, по возрастанию created_at."""
         result = await self.db.execute(
-            select(UserFile.id)
-            .where(UserFile.user_id == user_id, UserFile.namespace_id == namespace_id)
-            .order_by(UserFile.created_at.asc())
+            text(
+                """
+                WITH RECURSIVE namespace_tree AS (
+                    SELECT id
+                    FROM namespaces
+                    WHERE user_id = :user_id AND id = :namespace_id
+                    UNION ALL
+                    SELECT child.id
+                    FROM namespaces child
+                    JOIN namespace_tree tree ON child.parent_id = tree.id
+                    WHERE child.user_id = :user_id
+                )
+                SELECT uf.id
+                FROM user_files uf
+                WHERE uf.user_id = :user_id
+                  AND uf.namespace_id IN (SELECT id FROM namespace_tree)
+                ORDER BY uf.created_at ASC
+                """
+            ),
+            {"user_id": user_id, "namespace_id": namespace_id},
         )
         return [row[0] for row in result.fetchall()]
 

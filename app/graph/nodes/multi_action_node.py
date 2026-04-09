@@ -338,7 +338,7 @@ class MultiActionNode:
                 "history_file_id": target_fid,
                 "search_file_ids": [target_fid],
                 "detected_url": None,
-                "file_content": None,
+                "attached_files": None,
             }
             pipeline_context.pop("entity_content", None)
             pipeline_context.pop("entity_name_fallback", None)
@@ -347,11 +347,11 @@ class MultiActionNode:
                 **sub_state,
                 "history_file_id": pipeline_context["history_file_id"],
                 "detected_url": None,
-                "file_content": None,
+                "attached_files": None,
             }
         elif (
             action_ns_hint
-            and not sub_state.get("file_content")
+            and not sub_state.get("attached_files")
             and not sub_state.get("detected_url")
         ):
             # Явный namespace в шаге плана → суммаризируем файлы пространства,
@@ -371,11 +371,11 @@ class MultiActionNode:
                         "search_file_ids": ns_file_ids,
                         "history_file_id": None,
                         "detected_url": None,
-                        "file_content": None,
+                        "attached_files": None,
                     }
         elif (
             not sub_state.get("history_file_id")
-            and not sub_state.get("file_content")
+            and not sub_state.get("attached_files")
             and not sub_state.get("detected_url")
             and sub_state.get("namespace_id")
         ):
@@ -393,7 +393,7 @@ class MultiActionNode:
                     **sub_state,
                     "search_file_ids": ns_file_ids,
                     "detected_url": None,
-                    "file_content": None,
+                    "attached_files": None,
                 }
 
         result = await self.summary_node.run(sub_state, config)

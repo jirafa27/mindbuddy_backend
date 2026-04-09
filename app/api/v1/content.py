@@ -11,7 +11,7 @@ from app.services.summary_service import SummaryService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/content", tags=["Content"])
+router = APIRouter()
 
 
 @router.post("/extract", response_model=ResponseMessage[ContentExtractResponse])

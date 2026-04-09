@@ -1,6 +1,15 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional
+from typing import Any, Literal, Optional, TypedDict
+from enum import Enum
+
+
+class RawFileUpload(TypedDict, total=False):
+    """Один загруженный файл из HTTP-запроса до сохранения в BlobStorage."""
+    content: bytes
+    filename: str
+    content_type: Optional[str]
+    size: int
 
 
 class FileUploadRequest(BaseModel):
@@ -57,6 +66,12 @@ class FileInfo(BaseModel):
     created_at: datetime
     updated_at: datetime
     file_path: Optional[str] = None
+    desktop_updated_at: Optional[datetime] = None
+    app_updated_at: Optional[datetime] = None
+    last_update_source: Optional[str] = None
+    content_hash: Optional[str] = None
+    vault_relative_path: Optional[str] = None
+    is_conflict_copy: bool = False
 
     class Config:
         from_attributes = True
@@ -136,6 +151,8 @@ class FileStructureItem(BaseModel):
     filename: str = Field(..., description="Имя файла")
     file_size: int = Field(..., description="Размер в байтах")
     updated_at: datetime = Field(..., description="Время последнего обновления для сравнения с локальным")
+    content_hash: Optional[str] = Field(None, description="SHA256 содержимого файла для сравнения")
+    vault_relative_path: Optional[str] = Field(None, description="Относительный путь файла в desktop vault")
 
     class Config:
         from_attributes = True
@@ -145,15 +162,98 @@ class NamespaceStructureItem(BaseModel):
     """Элемент структуры: namespace как «папка» с файлами"""
     id: int = Field(..., description="ID пространства знаний")
     name: str = Field(..., description="Имя пространства (имя папки на диске)")
+    parent_id: Optional[int] = Field(None, description="ID родительского пространства")
+    kind: str = Field("regular", description="Тип пространства: regular, inbox, trash, vault_root")
     files: list[FileStructureItem] = Field(default_factory=list, description="Файлы в этом пространстве")
+    children: list["NamespaceStructureItem"] = Field(default_factory=list, description="Дочерние пространства")
 
     class Config:
         from_attributes = True
 
 
 class StructureResponse(BaseModel):
-    """Полная структура файлов и папок для watcher (все namespace пользователя)"""
+    """Список пространств с файлами пользователя"""
     namespaces: list[NamespaceStructureItem] = Field(
         default_factory=list,
-        description="Список пространств (папок), в каждом — список файлов",
+        description="Список пространств с файлами (плоский список, без вложенности)",
     )
+
+class FileVersionInfo(BaseModel):
+    """Минимальная информация о версии файла для pre-save check."""
+    user_file_id: int
+    content_file_id: int
+    updated_at: datetime
+    desktop_updated_at: Optional[datetime] = None
+    app_updated_at: Optional[datetime] = None
+    last_update_source: Optional[str] = None
+    content_hash: Optional[str] = None
+    vault_relative_path: Optional[str] = None
+
+
+class SyncConflictInfo(BaseModel):
+    """Структура конфликта версий для UI."""
+    message: str
+    server: FileVersionInfo
+
+
+class SyncUploadRequest(BaseModel):
+    """Запрос от Desktop Watcher на отправку локальной версии файла."""
+    user_file_id: Optional[int] = Field(None, description="ID user_files, если уже известен watcher")
+    vault_name: Optional[str] = Field(None, description="Имя корневой папки vault на ПК")
+    vault_relative_path: str = Field(..., description="Путь файла относительно desktop vault")
+    filename: str = Field(..., description="Имя файла")
+    content_hash: Optional[str] = Field(None, description="SHA256 содержимого файла от watcher")
+    file_bytes: bytes = Field(..., description="Содержимое файла в виде bytes")
+
+class SyncUploadResponse(BaseModel):
+    """Результат принятия desktop upload."""
+    file: FileInfo
+    conflict_copy_file_id: Optional[int] = None
+    created: bool = False
+    applied_as: Literal["desktop"] = "desktop"
+
+
+class CommandStatus(str, Enum):
+    """Статус команды."""
+    ACKED = "acked"
+    FAILED = "failed"
+    PENDING = "pending"
+
+class CommandType(str, Enum):
+    """Тип команды."""
+    UPSERT = "upsert"
+    DELETE = "delete"
+    RENAME = "rename"
+    MOVE = "move"
+    TRASH = "trash"
+
+class SyncCommandItem(BaseModel):
+    """Команда для Desktop Watcher."""
+    id: int
+    user_file_id: Optional[int]
+    command_type: CommandType
+    payload: dict[str, Any]
+    status: CommandStatus
+    created_at: datetime
+
+
+class SyncCommandsResponse(BaseModel):
+    """Список ожидающих sync-команд."""
+    commands: list[SyncCommandItem] = Field(default_factory=list)
+
+class SyncAckRequest(BaseModel):
+    """Подтверждение выполнения команд watcher'ом."""
+    command_id: int = Field(..., description="ID команды")
+    status: CommandStatus = Field(..., description="Статус команды")
+
+
+class SyncAckResponse(BaseModel):
+    """Результат подтверждения команды."""
+    acked_at: datetime
+    command_id: int
+    command_type: CommandType
+    status: CommandStatus
+
+
+
+NamespaceStructureItem.model_rebuild()

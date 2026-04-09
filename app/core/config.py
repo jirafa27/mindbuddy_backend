@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # OpenRouter (внешний LLM API, OpenAI-совместимый)
     OPENROUTER_API_KEY: Optional[str] = None
-    OPENROUTER_LLM_MODEL: str = "openai/gpt-4o-mini"
+    OPENROUTER_LLM_MODEL: str = "google/gemini-2.5-flash-lite"
     OPENROUTER_TIMEOUT: float = 60.0
 
     # Text Chunking

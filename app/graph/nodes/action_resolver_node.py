@@ -10,14 +10,12 @@ from langchain_core.runnables import RunnableConfig
 from app.core.enums import IntentType
 from app.graph.state import AskState
 from app.graph.sub_state_builder import build_sub_state
-from app.graph.utils.namespace import resolve_namespace_id, resolve_namespace_name
+from app.graph.utils.namespace import resolve_namespace_id, resolve_namespace_name, list_namespace_names
 from app.infrastructure.repositories.vector_queries import LIST_FILES_SQL
 from app.domain.protocols import LLMProvider
 from app.services.planner_service import PlanStep
 
 logger = logging.getLogger(__name__)
-
-_HISTORY_SCAN_LIMIT = 10
 
 
 # ---------------------------------------------------------------------------
@@ -44,8 +42,9 @@ _PARAM_PROMPTS: Dict[str, str] = {
 
 Правила:
 - namespace_hint — название пространства, куда сохранить файл.
-- Если пользователь назвал пространство явно (например "в пространство Тест" или "туда" когда ранее упомянуто пространство в запросе) — указать его название.
-- Если пространство не указано явно — namespace_hint=null (возьмётся из контекста UI).""",
+- Если пользователь назвал пространство явно ("в пространство Тест") — указать его название.
+- Если пользователь говорит "туда", "там", "в это пространство" — взять название из поля "Активное пространство" в контексте.
+- Если пространство не указано и нет активного в контексте — namespace_hint=null.""",
 
     IntentType.SUMMARIZE: """\
 Определи параметры для суммаризации.
@@ -53,9 +52,12 @@ _PARAM_PROMPTS: Dict[str, str] = {
 
 Правила:
 - namespace_hint — ТОЧНОЕ название пространства если пользователь назвал его явно.
-- "О чём файлы в этом пространстве?" / "Суммаризируй файлы этого пространства" → namespace_hint=null (UI-контекст).
 - "О чём файлы в пространстве Архив?" / "Суммаризируй файлы из Архив" → namespace_hint="Архив".
-- Если суммаризируется прикреплённый файл или URL — namespace_hint=null.""",
+- "Суммаризируй файлы этого пространства" / "из этого пространства" / "в этом пространстве":
+  Если в контексте указано "Активное пространство" — использовать его название как namespace_hint.
+  Если активного пространства нет — namespace_hint=null (возьмётся из UI).
+- Если суммаризируется прикреплённый файл или URL — namespace_hint=null.
+- Если в контексте есть "Активное пространство (из UI)" и оно отличается от контекста диалога — приоритет у UI.""",
 
     IntentType.SAVE_SUMMARY: """\
 Определи параметры для сохранения суммаризации.
@@ -73,30 +75,35 @@ _PARAM_PROMPTS: Dict[str, str] = {
 
 Правила:
 - entity_name — ОБЯЗАТЕЛЬНО: название нового пространства.
-- entity_description — описание, если указано. Обычно null.""",
+- entity_description — описание, если указано. Обычно null.
+- КРИТИЧНО: Слова-коррекции («нет», «не», «нет,», «не то», «не так») — НЕ название пространства. Ищи название после них.""",
 
     IntentType.EDIT_NAMESPACE_NAME: """\
 Определи параметры для переименования пространства.
 Верни JSON: {"namespace_hint": ..., "entity_name": ...}
 
 Правила:
-- namespace_hint — ТОЧНОЕ текущее название пространства из сообщения (не сокращай!).
-- entity_name — новое название.""",
+- namespace_hint — текущее название пространства из сообщения. Если в контексте есть список существующих пространств и пользователь допустил опечатку — выбери ближайшее по написанию.
+- entity_name — новое название.
+- КРИТИЧНО: Слова-коррекции («нет», «не», «нет,», «не то», «не так») — НЕ название пространства → namespace_hint=null.""",
 
     IntentType.EDIT_NAMESPACE_DESCRIPTION: """\
 Определи параметры для изменения описания пространства.
 Верни JSON: {"namespace_hint": ..., "entity_description": ...}
 
 Правила:
-- namespace_hint — ТОЧНОЕ название пространства из сообщения (не сокращай!).
-- entity_description — новое описание.""",
+- namespace_hint — название пространства из сообщения. Если в контексте есть список существующих пространств и пользователь допустил опечатку — выбери ближайшее по написанию.
+- entity_description — новое описание.
+- КРИТИЧНО: Слова-коррекции («нет», «не», «нет,», «не то», «не так») — НЕ название пространства → namespace_hint=null.""",
 
     IntentType.DELETE_NAMESPACE: """\
 Определи параметры для удаления пространства.
 Верни JSON: {"namespace_hint": ...}
 
 Правила:
-- namespace_hint — ТОЧНОЕ название пространства из сообщения пользователя (не сокращай, не изменяй!).""",
+- namespace_hint — название пространства из сообщения пользователя.
+- Если в контексте есть список существующих пространств и название из сообщения содержит опечатку — выбери БЛИЖАЙШЕЕ по написанию пространство из списка.
+- Не подставляй активное пространство, если пользователь назвал другое (даже с опечаткой).""",
 
     IntentType.MOVE_FILE: """\
 Определи параметры для перемещения файла.
@@ -104,8 +111,8 @@ _PARAM_PROMPTS: Dict[str, str] = {
 
 Правила:
 - search_query — имя файла для перемещения. null если все файлы.
-- namespace_hint — ТОЧНОЕ название пространства НАЗНАЧЕНИЯ из сообщения (не сокращай!).
-- entity_name — ТОЧНОЕ название пространства ИСТОЧНИК из сообщения (не сокращай!). null если один файл.""",
+- namespace_hint — название пространства НАЗНАЧЕНИЯ из сообщения. Если в контексте есть список существующих пространств и пользователь допустил опечатку — выбери ближайшее по написанию.
+- entity_name — название пространства ИСТОЧНИК из сообщения. Те же правила по опечаткам. null если один файл.""",
 
     IntentType.CREATE_FILE: """\
 Определи параметры для создания файла/заметки.
@@ -124,7 +131,7 @@ _PARAM_PROMPTS: Dict[str, str] = {
 
 Правила:
 - search_query — имя файла. null если удаление из пространства (всех или любого).
-- namespace_hint — ТОЧНОЕ название пространства из сообщения пользователя (не сокращай, не изменяй!). null если не указано.
+- namespace_hint — название пространства из сообщения пользователя. Если в контексте есть список существующих пространств и пользователь допустил опечатку — выбери ближайшее по написанию. null если не указано.
 - search_limit — целое число. Если "удали любой файл" / "удали один файл" → search_limit=1. Если "удали все файлы" или конкретный файл → null.""",
 
     IntentType.EDIT_FILE: """\
@@ -156,14 +163,18 @@ _PARAM_PROMPTS: Dict[str, str] = {
 
 Правила:
 - search_query — ОБЯЗАТЕЛЬНО: вопрос/тема в 2-5 словах.
-- namespace_hint — пространство для поиска, если указано.""",
+- namespace_hint — пространство для поиска, ТОЛЬКО если пользователь ЯВНО его назвал.
+- КРИТИЧНО: НЕ извлекай namespace_hint из URL (домен, путь). "ru.wikipedia.org", "youtube.com", "github.com" — НЕ пространства → null.""",
 
     IntentType.INDEX_URL: """\
 Определи параметры для сохранения URL.
 Верни JSON: {"namespace_hint": ...}
 
 Правила:
-- namespace_hint — пространство, куда сохранить URL. null если не указано.""",
+- namespace_hint — название пространства ТОЛЬКО если пользователь ЯВНО его назвал ("сохрани ссылку в Архив").
+- КРИТИЧНО: НЕ извлекай namespace_hint из самого URL (домена, пути, заголовка страницы)! "wikipedia", "youtube", "github" — это НЕ пространства.
+- Если пользователь говорит "туда" / "в это пространство" — взять из поля "Активное пространство" в контексте.
+- Если пользователь не указал пространство — namespace_hint=null.""",
 
     IntentType.LIST_FILES: """\
 Определи параметры для списка файлов.
@@ -180,7 +191,10 @@ _PARAM_PROMPTS: Dict[str, str] = {
 _DEFAULT_PARAM_PROMPT = """\
 Определи параметры для действия.
 Верни JSON: {"namespace_hint": ..., "search_query": ..., "entity_name": ..., "entity_description": ..., "entity_content": ...}
-Все поля nullable."""
+Все поля nullable.
+
+КРИТИЧНО: Слова-коррекции («нет», «не», «нет,», «не то», «не так», «неправильно») — это НЕ название пространства,
+НЕ имя файла и НЕ поисковый запрос. Если сообщение начинается с такого слова — игнорируй его при извлечении параметров."""
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +216,7 @@ class ActionResolverNode:
     async def run(self, state: AskState, config: RunnableConfig) -> AskState:
         planned_intents: List[str] = state.get("planned_intents") or []
         question = state.get("question", "").strip()
-        history = state.get("history") or []
-        file_content = state.get("file_content")
+        has_file = bool(state.get("attached_files"))
         agent_steps = list(state.get("agent_steps") or [])
 
         detected_url = state.get("detected_url")
@@ -213,30 +226,33 @@ class ActionResolverNode:
         db = configurable.get("async_db")
         user_id = state.get("user_id")
 
+        # namespace_id от UI (клиент явно передал)
         active_namespace_name: Optional[str] = None
         state_namespace_id = state.get("namespace_id")
-        # Если state не содержит namespace_id (прямой вызов без ChatService) —
-        # пробуем взять из структурированной истории (namespace_id из сохранённых сообщений)
-        if not state_namespace_id and history and db and user_id is not None:
-            for msg in reversed(history[-self._HISTORY_NS_SCAN:]):
-                ns_id = msg.get("namespace_id")
-                if ns_id:
-                    state_namespace_id = int(ns_id)
-                    logger.debug(
-                        "[ActionResolverNode] Recovered namespace_id=%d from structured history",
-                        state_namespace_id,
-                    )
-                    break
         if state_namespace_id and db and user_id is not None:
             active_namespace_name = await self._resolve_namespace_name(db, state_namespace_id)
+
+        # Если клиент не передал namespace_id: берём active_namespace_id из Chat.context
+        # (последнее пространство после предыдущего ответа) и подставляем в промпт только
+        # для интентов из _CONTEXT_NS_INTENTS — глобальные запросы (rag_query и т.д.) не затрагиваем.
+        conversation_context = state.get("conversation_context") or {}
+        context_namespace_name: Optional[str] = None
+        ctx_ns_id = conversation_context.get("active_namespace_id")
+        if ctx_ns_id and not state_namespace_id and db and user_id is not None:
+            context_namespace_name = await self._resolve_namespace_name(db, ctx_ns_id)
+
+        available_ns_names: List[str] = []
+        if db and user_id is not None:
+            available_ns_names = await list_namespace_names(db, user_id)
 
         steps: List[PlanStep] = []
         resolved_so_far: List[str] = []
         for intent in planned_intents:
             params = await self._resolve_params(
-                intent, question, active_namespace_name, bool(file_content),
+                intent, question, active_namespace_name, has_file,
                 plan_context=resolved_so_far if len(planned_intents) > 1 else None,
-                history=history,
+                context_namespace_name=context_namespace_name,
+                available_namespaces=available_ns_names,
             )
             search_limit_raw = params.get("search_limit")
             search_limit = int(search_limit_raw) if search_limit_raw is not None else None
@@ -268,7 +284,7 @@ class ActionResolverNode:
             " → ".join(f"{s.tool}(ns={s.namespace_hint})" for s in steps),
         )
 
-        resolved_actions = await self._resolve_namespaces(steps, db, user_id)
+        resolved_actions = await self._resolve_namespaces(steps, db, user_id, conversation_context)
         resolved_actions = self._collapse_send_file_steps(resolved_actions)
 
         if len(resolved_actions) == 1:
@@ -289,13 +305,12 @@ class ActionResolverNode:
     # LLM для параметров
     # ------------------------------------------------------------------
 
-    # Интенты, для которых имеет смысл восстанавливать пространство из истории
-    _HISTORY_NS_INTENTS = {
+    _CONTEXT_NS_INTENTS = {
         IntentType.EDIT_FILE, IntentType.RENAME_FILE, IntentType.DELETE_FILE,
         IntentType.MOVE_FILE, IntentType.SEND_FILE, IntentType.SUMMARIZE,
+        IntentType.EDIT_NAMESPACE_NAME, IntentType.EDIT_NAMESPACE_DESCRIPTION,
+        IntentType.DELETE_NAMESPACE, IntentType.SAVE_FILE,
     }
-    # Сколько последних сообщений сканировать
-    _HISTORY_NS_SCAN = 6
 
     async def _resolve_params(
         self,
@@ -304,24 +319,24 @@ class ActionResolverNode:
         active_namespace_name: Optional[str],
         has_file: bool,
         plan_context: Optional[List[str]] = None,
-        history: Optional[List[dict]] = None,
+        context_namespace_name: Optional[str] = None,
+        available_namespaces: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         prompt_template = _PARAM_PROMPTS.get(intent, _DEFAULT_PARAM_PROMPT)
 
         context_parts = []
         if has_file:
             context_parts.append("Прикреплён файл.")
+        if available_namespaces:
+            context_parts.append(
+                f"Существующие пространства пользователя: {', '.join(available_namespaces)}."
+            )
         if active_namespace_name:
             context_parts.append(f"Активное пространство: {active_namespace_name}.")
-        elif intent in self._HISTORY_NS_INTENTS and not active_namespace_name:
-            # Крайний резерв: ни UI, ни structured history не дали namespace_id —
-            # пробуем разобрать текст последних ответов ассистента через regex.
-            history_ns = self._extract_last_namespace_from_history(history)
-            if history_ns:
-                context_parts.append(
-                    f"Последнее упомянутое пространство (из истории диалога): {history_ns}. "
-                    "Используй его если пространство не указано явно в текущем запросе."
-                )
+        elif intent in self._CONTEXT_NS_INTENTS and context_namespace_name:
+            context_parts.append(
+                f"Активное пространство (из контекста диалога): {context_namespace_name}."
+            )
         if plan_context:
             context_parts.append(
                 f"Уже определены шаги: {' → '.join(plan_context)}. "
@@ -376,32 +391,6 @@ class ActionResolverNode:
             pass
         return {}
 
-    def _extract_last_namespace_from_history(
-        self, history: Optional[List[dict]]
-    ) -> Optional[str]:
-        """
-        Ищет в последних N сообщениях ассистента упоминание пространства.
-        Эвристика: ищем паттерны вроде «пространство(е) «X»» или «из «X»».
-        Возвращает первое найденное название (с конца истории).
-        """
-        if not history:
-            return None
-        _NS_PATTERN = re.compile(
-            r'пространств[еао]\s+[«""]([^»""]+)[»""]'
-            r'|[«""]([^»""]+)[»""]\s+(?:пространств[еао]|создан[ао])',
-            re.IGNORECASE,
-        )
-        for msg in reversed(history[-self._HISTORY_NS_SCAN:]):
-            if (msg.get("role") or "") != "assistant":
-                continue
-            text = msg.get("text") or ""
-            m = _NS_PATTERN.search(text)
-            if m:
-                ns = m.group(1) or m.group(2)
-                if ns:
-                    return ns.strip()
-        return None
-
     # ------------------------------------------------------------------
     # Резолв namespace (перенесено из PlannerNode)
     # ------------------------------------------------------------------
@@ -411,6 +400,7 @@ class ActionResolverNode:
         steps: List[PlanStep],
         db: Any,
         user_id: Optional[int],
+        conversation_context: Optional[dict] = None,
     ) -> List[Dict[str, Any]]:
         resolved: List[Dict[str, Any]] = []
         pending_ns_names: list[str] = []
@@ -435,8 +425,18 @@ class ActionResolverNode:
                     step.tool, ns_hint,
                 )
 
-            if ns_hint and db and user_id is not None:
+            if ns_hint and pending_ns_names and any(ns_hint.lower() == pn.lower() for pn in pending_ns_names):
+                logger.info(
+                    "[ActionResolverNode] %s: namespace '%s' is pending creation in batch — skipping DB resolution",
+                    step.tool, ns_hint,
+                )
+            elif ns_hint and db and user_id is not None:
                 ns_id = await self._resolve_namespace_id(db, user_id, ns_hint)
+
+            if ns_id is not None and db and user_id is not None:
+                resolved_name = await self._resolve_namespace_name(db, ns_id)
+                if resolved_name:
+                    ns_hint = resolved_name
 
             if step.tool == IntentType.CREATE_NAMESPACE and not entity_name and ns_hint:
                 entity_name = ns_hint
@@ -459,6 +459,22 @@ class ActionResolverNode:
                 )
 
             if step.tool == IntentType.SAVE_FILE and ns_id is None and not ns_hint:
+                # Сначала пробуем активное пространство из контекста диалога
+                ctx_ns_id = (conversation_context or {}).get("active_namespace_id")
+                if ctx_ns_id and db and user_id is not None:
+                    ns_id = ctx_ns_id
+                    logger.info(
+                        "[ActionResolverNode] %s: using active_namespace_id=%d from conversation_context",
+                        step.tool, ns_id,
+                    )
+                elif db and user_id is not None:
+                    inbox_id = await self._resolve_namespace_id(db, user_id, "Inbox")
+                    if inbox_id:
+                        ns_id = inbox_id
+                        ns_hint = "Inbox"
+                        logger.info("[ActionResolverNode] %s: defaulting to Inbox (id=%d)", step.tool, inbox_id)
+
+            if step.tool == IntentType.INDEX_URL and ns_id is None and not ns_hint:
                 if db and user_id is not None:
                     inbox_id = await self._resolve_namespace_id(db, user_id, "Inbox")
                     if inbox_id:
@@ -536,6 +552,20 @@ class ActionResolverNode:
         # Если LLM не вернул id пространства — берём из UI (прикреплённое пространство)
         effective_ns_id = ns_id if ns_id is not None else state.get("namespace_id")
 
+        # Фолбэк на последнее активное пространство из контекста диалога —
+        # только для операций, которые напрямую изменяют пространство.
+        # НЕ применяем для summarize/rag_query/index_url — там namespace_id
+        # управляет поиском/сохранением и не должен браться из контекста.
+        _CONTEXT_NS_FALLBACK_INTENTS = {
+            IntentType.EDIT_NAMESPACE_NAME,
+            IntentType.EDIT_NAMESPACE_DESCRIPTION,
+            IntentType.DELETE_NAMESPACE,
+            IntentType.CREATE_FILE,
+        }
+        if effective_ns_id is None and intent in _CONTEXT_NS_FALLBACK_INTENTS:
+            ctx = state.get("conversation_context") or {}
+            effective_ns_id = ctx.get("active_namespace_id") or None
+
         if intent == IntentType.SUMMARIZE:
             url_in_current_message = state.get("url_in_current_message")
             effective_file_id = history_file_id or state.get("history_file_id")
@@ -564,6 +594,10 @@ class ActionResolverNode:
             effective_search_file_ids = state.get("search_file_ids")
             if not effective_search_file_ids and history_file_id:
                 effective_search_file_ids = [history_file_id]
+
+            if not state.get("explicit_file_ids") and not effective_ns_id:
+                effective_search_file_ids = None
+
             return build_sub_state(
                 state, intent,
                 namespace_id=effective_ns_id,
@@ -585,6 +619,7 @@ class ActionResolverNode:
             return build_sub_state(
                 state, intent,
                 namespace_id=effective_ns_id,
+                namespace_name_hint=ns_hint,
                 detected_url=detected_url,
                 agent_steps=agent_steps + ["[ActionResolverNode] Single: index_url"],
             )

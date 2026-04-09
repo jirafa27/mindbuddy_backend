@@ -45,6 +45,7 @@ class IndexUrlNode:
         detected_url = state.get("detected_url")
         user_id = state.get("user_id")
         namespace_id = state.get("namespace_id")
+        ns_label = state.get("namespace_name_hint") or (str(namespace_id) if namespace_id else "Inbox")
         
         configurable = (config or {}).get("configurable") or {}
         db: AsyncSession | None = configurable.get("async_db")
@@ -76,10 +77,9 @@ class IndexUrlNode:
                 logger.info("[IndexUrl] Duplicate found: file_id=%d", dedup_result.existing_file_id)
                 return {
                     **state,
-                    "file_id": dedup_result.existing_file_id,  # user_file_id
-                    "answer": f"Контент уже сохранён в вашей базе знаний.\n\n"
-                              f"{parsed.title}\n\n"
-                              f"Хотите сделать краткое резюме?",
+                    "file_id": dedup_result.existing_file_id,
+                    "answer": f"Содержимое этой ссылки уже сохранено в пространство «{ns_label}».\n\n"
+                              f"**{parsed.title}**",
                     "agent_steps": state.get("agent_steps", []) + [
                         f"[IndexUrl] Duplicate: file_id={dedup_result.existing_file_id}",
                     ],
@@ -107,9 +107,8 @@ class IndexUrlNode:
             return {
                 **state,
                 "file_id": user_file.id,
-                "answer": f"Изучил контент и добавил в вашу базу знаний.\n\n"
-                          f"**{parsed.title}**\n\n"
-                          f"Что хотите сделать?",
+                "answer": f"Сохранил содержимое ссылки в пространство «{ns_label}».\n\n"
+                          f"**{parsed.title}**",
                 "agent_steps": state.get("agent_steps", []) + [
                     f"[IndexUrl] Indexed: file_id={user_file.id}, title={parsed.title}",
                 ],

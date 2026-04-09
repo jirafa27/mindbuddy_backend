@@ -77,13 +77,20 @@ class PgFileRepository:
         *,
         content_hash: str,
         media_metadata: Optional[dict] = None,
+        transcript_text: Optional[str] = None,
     ) -> Optional[FileEntity]:
         """Обновляет content_hash и media_metadata файла."""
         meta = media_metadata or {}
+        values = {
+            "content_hash": content_hash,
+            "media_metadata": meta,
+        }
+        if transcript_text is not None:
+            values["transcript_text"] = transcript_text
         await self.db.execute(
             update(File)
             .where(File.id == file_id)
-            .values(content_hash=content_hash, media_metadata=meta)
+            .values(**values)
         )
         await self.db.flush()
         return await self.get_by_id(file_id)

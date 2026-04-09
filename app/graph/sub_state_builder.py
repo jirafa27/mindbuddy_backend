@@ -30,10 +30,9 @@ ACTION: set[str] = {
 FILE_CONTEXT: set[str] = {
     "history_file_id",
     "search_file_ids",
-    "file_content",
-    "filename",
+    "attached_files",
     "detected_url",
-    "blob_key",
+    "blobs",
 }
 
 CHAT_CONTEXT: set[str] = {
@@ -51,10 +50,10 @@ _INTENT_FIELDS: dict[str, set[str]] = {
     # CRUD — файловый контекст из истории НЕ передаётся
     # detected_url — для _create_file при пустом entity_content (URL из роутера)
     "create_file":                COMMON | ACTION | {"history", "detected_url"},
-    "edit_file":                  COMMON | ACTION | {"history"},
-    "rename_file":                COMMON | ACTION | {"history"},
-    "delete_file":                COMMON | ACTION | {"history"},
-    "move_file":                  COMMON | ACTION | {"history"},
+    "edit_file":                  COMMON | ACTION | {"history", "history_file_id", "search_file_ids"},
+    "rename_file":                COMMON | ACTION | {"history", "history_file_id", "search_file_ids"},
+    "delete_file":                COMMON | ACTION | {"history", "history_file_id", "search_file_ids"},
+    "move_file":                  COMMON | ACTION | {"history", "history_file_id", "search_file_ids"},
     "create_namespace":           COMMON | ACTION,
     "delete_namespace":           COMMON | ACTION,
     "edit_namespace_name":        COMMON | ACTION,

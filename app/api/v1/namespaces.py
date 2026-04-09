@@ -8,6 +8,7 @@ from app.schemas import (
     NamespaceUpdate,
     NamespaceResponse,
     NamespaceListItem,
+    NamespaceTreeItem,
     FileWithUrl,
     PaginationInfo,
     ResponseMessage,
@@ -21,6 +22,37 @@ from app.schemas.user import UserResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _build_namespace_tree(items: list[NamespaceListItem]) -> list[NamespaceTreeItem]:
+    nodes = {
+        item.id: NamespaceTreeItem(
+            id=item.id,
+            user_id=item.user_id,
+            name=item.name,
+            parent_id=item.parent_id,
+            kind=item.kind,
+            description=item.description,
+            created_at=item.created_at,
+            files_count=item.files_count,
+            children=[],
+        )
+        for item in items
+    }
+    roots: list[NamespaceTreeItem] = []
+    for item in items:
+        node = nodes[item.id]
+        if item.parent_id is not None and item.parent_id in nodes:
+            nodes[item.parent_id].children.append(node)
+        else:
+            roots.append(node)
+    roots.sort(
+        key=lambda node: (
+            0 if node.kind == "inbox" else 2 if node.kind == "trash" else 1,
+            node.name.lower(),
+        )
+    )
+    return roots
 
 
 @router.post(
@@ -41,8 +73,39 @@ async def create_namespace(
         name=namespace.name,
         user_id=user.id,
         description=namespace.description,
+        parent_id=namespace.parent_id,
     )
     return ResponseMessage(data=created)
+
+
+@router.get(
+    "/tree",
+    response_model=ResponseMessage[list[NamespaceTreeItem]],
+    summary="Дерево namespace пользователя",
+)
+async def list_namespaces_tree(
+    user: UserResponse = Depends(get_current_user),
+    service: NamespaceService = Depends(get_namespace_service),
+):
+    namespaces_with_count, _ = await service.get_user_namespaces(
+        user_id=user.id,
+        skip=0,
+        limit=1000,
+    )
+    items = [
+        NamespaceListItem(
+            id=ns.id,
+            user_id=ns.user_id,
+            name=ns.name,
+            parent_id=ns.parent_id,
+            kind=ns.kind,
+            description=ns.description,
+            created_at=ns.created_at,
+            files_count=count,
+        )
+        for ns, count in namespaces_with_count
+    ]
+    return ResponseMessage(data=_build_namespace_tree(items))
 
 
 @router.get(
@@ -88,6 +151,8 @@ async def get_namespace(
         id=ns_data.id,
         user_id=ns_data.user_id,
         name=ns_data.name,
+        parent_id=ns_data.parent_id,
+        kind=ns_data.kind,
         description=ns_data.description,
         created_at=ns_data.created_at,
         files=files_with_urls,
@@ -118,6 +183,8 @@ async def list_namespaces(
             id=ns.id,
             user_id=ns.user_id,
             name=ns.name,
+            parent_id=ns.parent_id,
+            kind=ns.kind,
             description=ns.description,
             created_at=ns.created_at,
             files_count=count,
@@ -158,14 +225,6 @@ async def delete_namespace(
     namespace_id: int,
     user: UserResponse = Depends(get_current_user),
     namespace_service: NamespaceService = Depends(get_namespace_service),
-    storage_service: FileStorage = Depends(get_storage_service),
 ):
-    """Удаляет namespace и файлы из хранилища. Аутентификация: JWT."""
-    await namespace_service.get_namespace(namespace_id=namespace_id, user_id=user.id)
-    file_paths = await namespace_service.get_namespace_file_paths(namespace_id)
+    """Удаляет namespace. Файлы перемещаются в корзину. Аутентификация: JWT."""
     await namespace_service.delete_namespace(namespace_id=namespace_id, user_id=user.id)
-    for path in file_paths:
-        try:
-            await storage_service.delete_file(path)
-        except Exception as e:
-            logger.warning("Failed to delete file from MinIO: %s", e)

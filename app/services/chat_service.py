@@ -4,8 +4,9 @@ from typing import Optional, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.graph.graph import build_ask_graph
-from app.graph.state import AskState
+from app.graph.state import AskState, AttachedFile
 from app.graph.schemas import AskResponse, SourceItem
+from app.schemas.file import RawFileUpload
 from app.domain.protocols import (
     BlobStorage,
     EmbeddingProvider,
@@ -16,7 +17,7 @@ from app.domain.protocols import (
     ChatRepository,
     UserFileRepository,
 )
-from app.domain.entities import ChatEntity, ChatMessageEntity
+from app.domain.entities import ChatEntity, ChatMessageEntity, ConversationContext
 from app.core.exceptions import NotFoundError, ForbiddenError
 from app.core.enums import ChatMessageRole
 from app.services.file_service import FileService
@@ -29,6 +30,7 @@ from app.utils.file_readers import FileReaderFactory
 
 logger = logging.getLogger(__name__)
 
+
 # Скользящее окно: сколько последних сообщений чата передавать в LLM
 CHAT_HISTORY_LIMIT = 10
 
@@ -40,15 +42,6 @@ def _is_confirmation(text: str) -> bool:
     return text.strip().lower().rstrip("!.,") in _CONFIRM_WORDS
 
 
-def _last_namespace_id_from_history(history: List[dict]) -> Optional[int]:
-    """Возвращает namespace_id последнего сообщения, у которого он не None."""
-    for msg in reversed(history):
-        ns = msg.get("namespace_id")
-        if ns is not None:
-            return int(ns)
-    return None
-
-
 def _decline_message(pending: dict) -> str:
     """Возвращает сообщение об отмене в зависимости от типа отложенного действия."""
     action_type = pending.get("type", "")
@@ -56,7 +49,7 @@ def _decline_message(pending: dict) -> str:
     if action_type == "delete_namespace":
         return f"Хорошо, {target} не удалено."
     if action_type == "delete_file":
-        return f"Хорошо, {target} не удалён."
+        return f"Хорошо, {target} не перемещён в корзину."
     return f"Хорошо, действие отменено."
 
 
@@ -93,6 +86,7 @@ class ChatService:
         self.file_service = file_service
         self.namespace_service = namespace_service
         self.content_extractor = content_extractor
+        self.blob_storage = blob_storage
 
         graph = build_ask_graph(
             file_reader_factory=file_reader_factory,
@@ -112,7 +106,7 @@ class ChatService:
         question: str,
         user_id: int,
         namespace_id: Optional[int] = None,
-        files: Optional[List[Tuple[bytes, str]]] = None,
+        files: Optional[List[RawFileUpload]] = None,
         file_ids: Optional[List[int]] = None,
         history: Optional[List[dict]] = None,
         override_intent: Optional[str] = None,
@@ -126,93 +120,174 @@ class ChatService:
         Перед запуском графа проверяет pending_action: если чат ожидает подтверждения
         удаления и пользователь подтверждает — выполняет действие без вызова графа.
         """
-        resolved_chat_id: Optional[int] = None
-        history_for_llm: List[dict] = list(history or [])
+        # Получаем контекст диалога из чата или создаём новый
+        resolved_chat_id, history_for_llm, conv_context = await self._resolve_chat(
+            chat_id, user_id, chat_name, fallback_history=history
+        )
 
-        if self.chat_repository:
-            if chat_id is not None:
-                existing = await self.chat_repository.get_chat_by_id(chat_id, user_id)
-                if existing is None:
-                    raise NotFoundError("Чат не найден или доступ запрещён")
-                resolved_chat_id = chat_id
-                total = await self.chat_repository.get_messages_count(chat_id, user_id)
-                if total > 0:
-                    offset = max(0, total - CHAT_HISTORY_LIMIT)
-                    history_entities = await self.chat_repository.get_messages(
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        limit=CHAT_HISTORY_LIMIT,
-                        offset=offset,
-                    )
-                    history_for_llm = [
-                        {
-                            "role": m.role.value,
-                            "text": m.text,
-                            "file_ids": m.file_ids,
-                            "namespace_id": m.namespace_id,
-                        }
-                        for m in history_entities
-                    ]
+        # Обрабатываем ожидающее подтверждения действие
+        if chat_id is not None:
+            pending_response = await self._try_resolve_pending_action(
+                chat_id, resolved_chat_id, question, namespace_id, user_id
+            )
+            if pending_response:
+                return pending_response
 
-                # Проверяем pending_action — отложенное удаление ожидает подтверждения
-                pending = await self.chat_repository.get_pending_action(chat_id)
-                if pending:
-                    if _is_confirmation(question):
-                        answer_text = await self._execute_pending_action(
-                            pending=pending, user_id=user_id
-                        )
-                        step = "ChatService(confirmed)"
-                    else:
-                        answer_text = _decline_message(pending)
-                        step = "ChatService(declined)"
-                        logger.info(
-                            "[ChatService] pending_action cancelled for chat_id=%d", chat_id
-                        )
+        # Формируем состояние для графа
+        state = await self._build_graph_state(
+            question, user_id, namespace_id, conv_context,
+            files, file_ids, history_for_llm, override_intent,
+        )
+        # Формируем конфигурацию для графа
+        config = self._build_graph_config()
+        # Запускаем граф
+        result = await self.ask_graph.ainvoke(state, config=config)
 
-                    await self.chat_repository.clear_pending_action(chat_id)
-                    await self.chat_repository.add_message(
-                        chat_id, ChatMessageRole.USER.value, question,
-                        file_ids=[], namespace_id=namespace_id,
-                    )
-                    await self.chat_repository.add_message(
-                        chat_id, ChatMessageRole.ASSISTANT.value, answer_text,
-                        file_ids=[], namespace_id=namespace_id,
-                    )
-                    await self.db.commit()
-                    return AskResponse(
-                        answer=answer_text,
-                        sources=[],
-                        agent_steps=[step],
-                        file_ids=[],
-                        chat_id=resolved_chat_id,
-                    )
-            else:
-                new_chat = await self.chat_repository.create_chat(
-                    user_id=user_id, name=chat_name
-                )
-                resolved_chat_id = new_chat.id
-                await self.db.commit()
+        answer_text = result.get("answer", "")
+        result_file_ids: List[int] = result.get("file_ids") or []
+        if not result_file_ids and result.get("file_id") is not None:
+            result_file_ids = [result["file_id"]]
+        is_save_file = result.get("intent") == "save_file" or override_intent == "save_file" or bool(files)
 
-        # Если клиент не передал namespace_id — не инжектируем его из истории на уровне ChatService,
-        # потому что интент ещё не известен и широкий запрос («покажи все файлы») ошибочно
-        # получит scoping по последнему пространству. Восстановление namespace по истории
-        # делается intent-aware внутри ActionResolverNode (_HISTORY_NS_INTENTS).
-        first_file_content = files[0][0] if files else None
-        first_filename = files[0][1] if files else None
+        if self.chat_repository and resolved_chat_id is not None:
+            await self._persist_turn(
+                resolved_chat_id, question, namespace_id, files, file_ids,
+                result_file_ids, is_save_file, answer_text, result, conv_context,
+            )
+
+        return AskResponse(
+            answer=answer_text,
+            sources=self._build_sources(result),
+            agent_steps=result.get("agent_steps") or [],
+            file_ids=result_file_ids,
+            chat_id=resolved_chat_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Вспомогательные методы ask()
+    # ------------------------------------------------------------------
+
+    async def _resolve_chat(
+        self,
+        chat_id: Optional[int],
+        user_id: int,
+        chat_name: Optional[str],
+        fallback_history: Optional[List[dict]],
+    ) -> Tuple["Optional[int]", List[dict], ConversationContext]:
+        """Загружает или создаёт чат. Возвращает (resolved_chat_id, history_for_llm, conv_context)."""
+        if not self.chat_repository:
+            return None, list(fallback_history or []), ConversationContext()
+
+        if chat_id is not None:
+            existing = await self.chat_repository.get_chat_by_id(chat_id, user_id)
+            if existing is None:
+                raise NotFoundError("Чат не найден или доступ запрещён")
+            history_for_llm = await self._load_chat_history(chat_id, user_id)
+            conv_context = ConversationContext.from_dict(existing.context)
+            return chat_id, history_for_llm, conv_context
+
+        new_chat = await self.chat_repository.create_chat(user_id=user_id, name=chat_name)
+        await self.db.commit()
+        return new_chat.id, list(fallback_history or []), ConversationContext()
+
+    async def _load_chat_history(self, chat_id: int, user_id: int) -> List[dict]:
+        """Загружает последние N сообщений чата в формате для LLM."""
+        total = await self.chat_repository.get_messages_count(chat_id, user_id)
+        if total == 0:
+            return []
+        offset = max(0, total - CHAT_HISTORY_LIMIT)
+        messages = await self.chat_repository.get_messages(
+            chat_id=chat_id, user_id=user_id, limit=CHAT_HISTORY_LIMIT, offset=offset,
+        )
+        return [
+            {
+                "role": m.role.value,
+                "text": m.text,
+                "file_ids": m.file_ids,
+                "namespace_id": m.namespace_id,
+            }
+            for m in messages
+        ]
+
+    async def _try_resolve_pending_action(
+        self,
+        chat_id: int,
+        resolved_chat_id: Optional[int],
+        question: str,
+        namespace_id: Optional[int],
+        user_id: int,
+    ) -> Optional[AskResponse]:
+        """Обрабатывает ожидающее подтверждения действие (удаление и т.п.).
+        Возвращает готовый AskResponse если pending был обработан, иначе None."""
+        if not self.chat_repository:
+            return None
+        pending = await self.chat_repository.get_pending_action(chat_id)
+        if not pending:
+            return None
+
+        if _is_confirmation(question):
+            answer_text = await self._execute_pending_action(pending=pending, user_id=user_id)
+            step = "ChatService(confirmed)"
+        else:
+            answer_text = _decline_message(pending)
+            step = "ChatService(declined)"
+            logger.info("[ChatService] pending_action cancelled for chat_id=%d", chat_id)
+
+        await self.chat_repository.clear_pending_action(chat_id)
+        await self.chat_repository.add_message(
+            chat_id, ChatMessageRole.USER.value, question,
+            file_ids=[], namespace_id=namespace_id,
+        )
+        await self.chat_repository.add_message(
+            chat_id, ChatMessageRole.ASSISTANT.value, answer_text,
+            file_ids=[], namespace_id=namespace_id,
+        )
+        await self.db.commit()
+        return AskResponse(
+            answer=answer_text, sources=[], agent_steps=[step],
+            file_ids=[], chat_id=resolved_chat_id,
+        )
+
+    async def _build_graph_state(
+        self,
+        question: str,
+        user_id: int,
+        namespace_id: Optional[int],
+        conv_context: ConversationContext,
+        files: Optional[List[RawFileUpload]],
+        file_ids: Optional[List[int]],
+        history: List[dict],
+        override_intent: Optional[str],
+    ) -> AskState:
+        attached_files: Optional[List[AttachedFile]] = None
+        if files:
+            attached_files = []
+            for f in files:
+                key = await self.blob_storage.put_blob({"raw": f["content"], "filename": f["filename"]})
+                attached_files.append(AttachedFile(
+                    file_blob_key=key,
+                    filename=f["filename"],
+                    content_type=f.get("content_type"),
+                    size=f.get("size", len(f["content"])),
+                ))
 
         state: AskState = {
             "question": question,
             "user_id": user_id,
             "namespace_id": namespace_id,
-            "file_content": first_file_content,
-            "filename": first_filename,
-            "history": history_for_llm,
+            "conversation_context": conv_context.to_dict(),
+            "attached_files": attached_files,
+            "history": history,
             "override_intent": override_intent,
         }
         if file_ids:
             state["history_file_id"] = file_ids[0]
             state["search_file_ids"] = file_ids
-        config = {
+            state["explicit_file_ids"] = True
+        return state
+
+    def _build_graph_config(self) -> dict:
+        return {
             "configurable": {
                 "async_db": self.db,
                 "file_repository": self.file_repository,
@@ -226,124 +301,70 @@ class ChatService:
                 "namespace_service": self.namespace_service,
             }
         }
-        result = await self.ask_graph.ainvoke(state, config=config)
 
-        answer_text = result.get("answer", "")
-        result_intent = result.get("intent")
-        is_save_file = (result_intent == "save_file" or override_intent == "save_file" or bool(files))
+    async def _persist_turn(
+        self,
+        resolved_chat_id: int,
+        question: str,
+        namespace_id: Optional[int],
+        files: Optional[List[RawFileUpload]],
+        file_ids: Optional[List[int]],
+        result_file_ids: List[int],
+        is_save_file: bool,
+        answer_text: str,
+        result: dict,
+        conv_context: ConversationContext,
+    ) -> None:
+        """Сохраняет оба сообщения хода, обновляет ConversationContext и pending_action в чате."""
+        # Сообщение пользователя: только его файлы + новые при batch-загрузке
+        user_file_ids = list(dict.fromkeys(file_ids or []))
+        if bool(files) and result_file_ids:
+            seen = set(user_file_ids)
+            for fid in result_file_ids:
+                if fid not in seen:
+                    user_file_ids.append(fid)
+                    seen.add(fid)
+        await self.chat_repository.add_message(
+            resolved_chat_id, ChatMessageRole.USER.value, question,
+            file_ids=user_file_ids, namespace_id=namespace_id,
+        )
 
-        result_file_ids: List[int] = result.get("file_ids") or []
-        if not result_file_ids and result.get("file_id") is not None:
-            result_file_ids = [result["file_id"]]
+        # Сообщение ассистента: при save_file файлы уже в сообщении пользователя
+        assistant_file_ids = [] if is_save_file else result_file_ids
+        resolved_namespace_id = (
+            result.get("created_namespace_id")
+            or result.get("namespace_id")
+            or namespace_id
+            or conv_context.active_namespace_id
+        )
+        await self.chat_repository.add_message(
+            resolved_chat_id, ChatMessageRole.ASSISTANT.value, answer_text,
+            file_ids=assistant_file_ids, namespace_id=resolved_namespace_id,
+        )
 
-        # Обрабатываем файлы 2+ через тот же граф.
-        # Если интент — summarize, суммаризируем все файлы; иначе просто сохраняем.
-        # Важно: запускаем последовательно — все sub-запросы используют одну DB-сессию,
-        # параллельный flush приводит к "Session is already flushing".
-        if files and len(files) > 1:
-            # Namespace: предпочитаем только что созданный через create_namespace в multi-step плане
-            resolved_ns = (
-                result.get("created_namespace_id")
-                or result.get("namespace_id")
-                or namespace_id
-            )
-            ns_hint = result.get("created_namespace_name") or result.get("namespace_name_hint")
+        conv_context.active_namespace_id = resolved_namespace_id
+        conv_context.active_file_ids = result_file_ids or []
+        await self.chat_repository.update_context(resolved_chat_id, conv_context.to_dict())
 
-            # Для multi-step планов с парой summarize → create_file
-            # дополнительные файлы тоже суммаризируем (а не просто сохраняем)
-            pending_actions = result.get("pending_actions") or []
-            has_summarize = any(a.get("intent") == "summarize" for a in pending_actions)
-            has_create_file = any(a.get("intent") == "create_file" for a in pending_actions)
-            if has_summarize and has_create_file:
-                extra_override = "summarize"
-            else:
-                extra_override = "summarize" if result_intent == "summarize" else "save_file"
-
-            all_answers: List[str] = [answer_text]
-            for extra_content, extra_filename in files[1:]:
-                extra_state: AskState = {
-                    "question": "",
-                    "user_id": user_id,
-                    "namespace_id": resolved_ns,
-                    "namespace_name_hint": ns_hint,
-                    "file_content": extra_content,
-                    "filename": extra_filename,
-                    "history": [],
-                    "override_intent": extra_override,
-                }
-                extra_result = await self.ask_graph.ainvoke(extra_state, config=config)
-                extra_ans = extra_result.get("answer", "")
-                if extra_ans:
-                    all_answers.append(extra_ans)
-                extra_fid = extra_result.get("file_id")
-                if extra_fid is not None:
-                    result_file_ids.append(extra_fid)
-
-            sep = "\n\n---\n\n" if extra_override == "summarize" else "\n"
-            answer_text = sep.join(all_answers)
-
-        if self.chat_repository and resolved_chat_id is not None:
-            # К сообщению пользователя добавляем только файлы, которые он сам прикрепил.
-            # Файлы, найденные графом (send_file и т.п.), относятся к ответу ассистента.
-            # Если пользователь загружал новые файлы — их IDs тоже сохраняем в его сообщение,
-            # чтобы следующий запрос мог их найти в истории.
-            user_message_file_ids = list(dict.fromkeys(file_ids or []))
-            if bool(files) and result_file_ids:
-                seen = set(user_message_file_ids)
-                for fid in result_file_ids:
-                    if fid not in seen:
-                        user_message_file_ids.append(fid)
-                        seen.add(fid)
-            await self.chat_repository.add_message(
-                resolved_chat_id, ChatMessageRole.USER.value, question,
-                file_ids=user_message_file_ids,
-                namespace_id=namespace_id,
-            )
-            # При сохранении файлов файлы относятся к сообщению пользователя, не ассистента
-            assistant_file_ids = [] if is_save_file else result_file_ids
-            resolved_namespace_id = (
-                result.get("created_namespace_id")
-                or result.get("namespace_id")
-                or namespace_id
-                or _last_namespace_id_from_history(history_for_llm)
-            )
-            await self.chat_repository.add_message(
-                resolved_chat_id, ChatMessageRole.ASSISTANT.value, answer_text,
-                file_ids=assistant_file_ids,
-                namespace_id=resolved_namespace_id,
+        if pending_from_graph := result.get("pending_action"):
+            await self.chat_repository.set_pending_action(resolved_chat_id, pending_from_graph)
+            logger.info(
+                "[ChatService] Set pending_action for chat_id=%d: type=%s",
+                resolved_chat_id, pending_from_graph.get("type"),
             )
 
-            # Если CrudNode вернул pending_action — сохраняем его в чате
-            pending_from_graph = result.get("pending_action")
-            if pending_from_graph and resolved_chat_id:
-                await self.chat_repository.set_pending_action(
-                    resolved_chat_id, pending_from_graph
-                )
-                logger.info(
-                    "[ChatService] Set pending_action for chat_id=%d: type=%s",
-                    resolved_chat_id, pending_from_graph.get("type"),
-                )
+        await self.db.flush()
+        await self.db.commit()
 
-            await self.db.flush()
-            await self.db.commit()
-
-        sources_raw: List[dict] = result.get("sources") or []
-        sources = [
+    def _build_sources(self, result: dict) -> List[SourceItem]:
+        return [
             SourceItem(
                 filename=s.get("filename", "?"),
                 relevance=s.get("relevance", 0.0),
                 file_id=s.get("file_id"),
             )
-            for s in sources_raw
+            for s in (result.get("sources") or [])
         ]
-
-        return AskResponse(
-            answer=answer_text,
-            sources=sources,
-            agent_steps=result.get("agent_steps") or [],
-            file_ids=result_file_ids,
-            chat_id=resolved_chat_id,
-        )
 
     async def _execute_pending_action(
         self, pending: dict, user_id: int
@@ -366,14 +387,14 @@ class ChatService:
                 await self.namespace_service.delete_namespace(
                     namespace_id=namespace_id, user_id=user_id
                 )
-                return f"{target.capitalize()} удалено вместе со всеми файлами."
+                return f"{target.capitalize()} удалено, а файлы перемещены в корзину."
 
             elif action_type == "delete_file":
                 file_id = params.get("file_id")
                 if not file_id:
                     return "Ошибка: не указан ID файла."
                 await self.file_service.delete_file(file_id=file_id, user_id=user_id)
-                return f"{target.capitalize()} удалён."
+                return f"{target.capitalize()} перемещён в корзину."
 
             elif action_type == "delete_all_in_namespace":
                 file_ids = params.get("file_ids") or []
@@ -387,9 +408,9 @@ class ChatService:
                     except Exception:
                         logger.warning("[ChatService] Failed to delete file_id=%d", fid)
                         failed += 1
-                result_msg = f"Удалено {deleted} файл(ов)."
+                result_msg = f"Перемещено в корзину {deleted} файл(ов)."
                 if failed:
-                    result_msg += f" Не удалось удалить: {failed}."
+                    result_msg += f" Не удалось переместить: {failed}."
                 return result_msg
 
             elif action_type == "batch_delete":

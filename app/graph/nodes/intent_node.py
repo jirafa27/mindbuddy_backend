@@ -1,6 +1,5 @@
 """IntentNode — определяет список намерений через LLM и записывает в state.planned_intents."""
 import logging
-from typing import List, Dict, Optional
 
 from langchain_core.runnables import RunnableConfig
 
@@ -25,7 +24,7 @@ class IntentNode:
     async def run(self, state: AskState, config: RunnableConfig) -> AskState:
         question = state.get("question", "").strip()
         history = state.get("history") or []
-        file_content = state.get("file_content")
+        has_file = bool(state.get("attached_files"))
         agent_steps = list(state.get("agent_steps") or [])
 
         url_in_current_message: bool = state.get("url_in_current_message") or False
@@ -38,7 +37,7 @@ class IntentNode:
 
         intents = await self.intent_classifier.classify(
             question,
-            has_file=bool(file_content),
+            has_file=has_file,
             has_url=url_in_current_message,
             has_history_url=has_history_url,
             has_history_summary=has_history_summary,

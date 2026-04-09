@@ -251,11 +251,11 @@ class SummaryService:
         file_content = await self.file_service.storage.download_file(file_path)
         if not file_content:
             raise ValueError("Не удалось загрузить файл из хранилища")
-        filename = uf.custom_title or (cf.media_metadata or {}).get("title") or "document"
-        file_ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "md"
+        file_ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "md"
         text = self.file_service.extract_text(file_content, file_ext)
         if not text or not text.strip():
             raise ValueError("Не удалось извлечь текст из файла")
+        filename = uf.custom_title or (cf.media_metadata or {}).get("title") or "document"
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
         return ContentToSummarize(
             text=text,

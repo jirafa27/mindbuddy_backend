@@ -9,6 +9,7 @@ class NamespaceCreate(BaseModel):
     """Схема создания namespace"""
     name: str = Field(..., min_length=1, max_length=255, description="Название namespace")
     description: Optional[str] = Field(None, max_length=1000, description="Описание namespace")
+    parent_id: Optional[int] = Field(None, description="ID родительского пространства")
 
 
 class NamespaceUpdate(BaseModel):
@@ -22,6 +23,8 @@ class NamespaceListItem(BaseModel):
     id: int
     user_id: int
     name: str
+    parent_id: Optional[int]
+    kind: str
     description: Optional[str]
     created_at: datetime
     files_count: int = Field(0, description="Количество файлов в namespace")
@@ -35,9 +38,26 @@ class NamespaceResponse(BaseModel):
     id: int
     user_id: int
     name: str
+    parent_id: Optional[int]
+    kind: str
     description: Optional[str]
     created_at: datetime
     files: List[FileWithUrl] = Field(default_factory=list, description="Список файлов с ссылками на скачивание")
 
     class Config:
         from_attributes = True
+
+
+class NamespaceTreeItem(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    parent_id: Optional[int]
+    kind: str
+    description: Optional[str]
+    created_at: datetime
+    files_count: int = 0
+    children: List["NamespaceTreeItem"] = Field(default_factory=list)
+
+
+NamespaceTreeItem.model_rebuild()

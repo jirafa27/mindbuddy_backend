@@ -24,4 +24,12 @@ class UserFileEntity:
     file_id: int
     namespace_id: Optional[int] = None
     custom_title: Optional[str] = None
+    vault_relative_path: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    desktop_updated_at: Optional[datetime] = None
+    app_updated_at: Optional[datetime] = None
+    last_update_source: Optional[str] = None
+    is_conflict_copy: bool = False
+    conflict_origin_user_file_id: Optional[int] = None
 

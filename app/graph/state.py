@@ -1,5 +1,20 @@
 """Состояние графа для RAG-пайплайна POST /ask."""
-from typing import TypedDict, Optional, Any, Dict, Literal, List
+from typing import TypedDict, Optional, Any, Dict, Literal, List, Tuple
+
+
+class AttachedFile(TypedDict, total=False):
+    """
+    Один файл из batch-загрузки: метаданные + ключ сырых байтов в BlobStorage.
+    Байты не хранятся в state — скачиваются узлами по file_blob_key.
+    """
+    # Ключ в MinIO: payload {"raw": bytes, "filename": str}.
+    file_blob_key: str
+    # Имя файла из HTTP-запроса (до decode_filename).
+    filename: str
+    # MIME-тип из HTTP-запроса (например "application/pdf"). None, если не передан.
+    content_type: Optional[str]
+    # Размер файла в байтах.
+    size: int
 
 
 # Типы намерений пользователя
@@ -23,6 +38,36 @@ IntentType = Literal[
 ]
 
 
+class FileSaveBlob(TypedDict, total=False):
+    """
+    Одна запись в state["blobs"]: промежуточный результат FileAgent для SaveFileNode.
+    Сырые байты файла в state не кладутся — только ключи MinIO и метаданные.
+    """
+
+    # Имя файла после decode_filename (для upload_file и сообщений пользователю).
+    filename: str
+    # SHA-256 hex исходных байтов; совпадает с тем, что использовал FileAgent для дедупликации.
+    content_hash: str
+    # Ключ в MinIO: payload с chunks + embeddings для vector_repository.create_batch.
+    # None, если эмбеддинги не генерировали (контент уже в БД).
+    blob_key: Optional[str]
+    # Ключ в MinIO: payload {"raw": bytes, "filename": str} — байты для file_service.upload_file.
+    # None при early_duplicate (сохранять нечего).
+    file_blob_key: Optional[str]
+    # True: ContentFile с эмбеддингами уже есть; нужен только UserFile в namespace (blob_key обычно None).
+    content_already_indexed: bool
+    # True: полный дубликат в этом namespace — SaveFileNode только возвращает file_id/answer, без MinIO/БД.
+    early_duplicate: bool
+    # True: файл не распарсился или пустой чанкинг — SaveFileNode пропускает запись тихо.
+    parse_error: bool
+    # При early_duplicate: user_file.id для ответа и search_file_ids.
+    file_id: Optional[int]
+    # При early_duplicate: текст «файл уже есть в пространстве».
+    answer: Optional[str]
+    # При early_duplicate: [user_file.id] для последующего RAG.
+    search_file_ids: Optional[List[int]]
+
+
 class AskState(TypedDict, total=False):
     """
     Единое состояние графа LangGraph для /ask.
@@ -38,14 +83,18 @@ class AskState(TypedDict, total=False):
     # Принудительный интент (если задан — RouterNode не анализирует текст)
     override_intent: Optional[IntentType]
     
+    # Персистентный контекст диалога (ConversationContext.to_dict())
+    conversation_context: Optional[Dict[str, Any]]
+
     # История сообщений (последние N сообщений для контекста)
     history: list[dict[str, str]]  # [{"role": "user"|"assistant", "text": "...", "file_ids": [...]}]
 
-    # Файл (опционально)
-    file_content: bytes
-    filename: str
+    # Файлы batch-загрузки: список AttachedFile — метаданные + ключ MinIO.
+    # Байты файлов в state не хранятся — только ключи BlobStorage.
+    attached_files: Optional[List[AttachedFile]]
 
-    blob_key: Optional[str]
+    # См. FileSaveBlob — по одному элементу на каждый файл из attached_files.
+    blobs: Optional[List[FileSaveBlob]]
 
     # Намерение пользователя (определяется RouterNode или из override_intent)
     intent: IntentType
@@ -66,6 +115,10 @@ class AskState(TypedDict, total=False):
 
     # Скоуп поиска по файлам (список user_files.id)
     search_file_ids: Optional[List[int]]
+
+    # True, если search_file_ids задан явно через API (file_ids query param),
+    # а не извлечён автоматически из истории чата RouterNode-ом.
+    explicit_file_ids: Optional[bool]
 
     # Поиск
     query_embedding: list[float]

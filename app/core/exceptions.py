@@ -28,9 +28,23 @@ class NotFoundError(AppException):
     default_message = "Resource not found"
 
 
+class UnauthorizedError(AppException):
+    """Нет или неверные учётные данные"""
+    default_message = "Unauthorized"
+
+
 class ForbiddenError(AppException):
     """Доступ запрещен"""
     default_message = "Access forbidden"
+
+
+class ConflictError(AppException):
+    """Конфликт версий или синхронизации"""
+    default_message = "Conflict"
+
+    def __init__(self, message: str | None = None, payload: dict | None = None):
+        self.payload = payload
+        super().__init__(message)
 
 
 class FileTooLargeError(AppException):

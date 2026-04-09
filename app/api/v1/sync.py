@@ -1,0 +1,143 @@
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+
+from app.core.dependencies import (
+    get_sync_service,
+    get_user_by_watcher_token,
+)
+from app.schemas.base import ResponseMessage
+from app.schemas.file import (
+    StructureResponse,
+    SyncAckRequest,
+    SyncAckResponse,
+    SyncCommandsResponse,
+    SyncUploadRequest,
+    SyncUploadResponse,
+)
+from app.schemas.user import UserResponse
+from app.services.sync_service import SyncService
+
+router = APIRouter()
+
+
+@router.post("/upload", response_model=ResponseMessage[SyncUploadResponse])
+async def sync_upload(
+    relative_path: str = Form(...),
+    vault_name: str = Form("Vault"),
+    user_file_id: Optional[int] = Form(None),
+    content_hash: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> ResponseMessage[SyncUploadResponse]:
+    """
+    Загрузка локальной версии файла на сервер.
+    Вотчер отправляет file (бинарный) или content (текст).
+    """
+    upload_bytes = await file.read()
+    filename = file.filename or relative_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    body = SyncUploadRequest(
+        user_file_id=user_file_id,
+        vault_name=vault_name,
+        vault_relative_path=relative_path,
+        filename=filename,
+        content_hash=content_hash,
+        file_bytes=upload_bytes,
+    )
+    result = await sync_service.upload_file(
+        user_id=user.id,
+        upload_request=body,
+    )
+    return ResponseMessage[SyncUploadResponse](data=result)
+
+
+@router.get("/commands", response_model=ResponseMessage[SyncCommandsResponse])
+async def get_sync_commands(
+    limit: int = 100,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> ResponseMessage[SyncCommandsResponse]:
+    """
+    Получение списка команд синхронизации, ожидающих выполнения
+    """
+    result = await sync_service.list_pending_commands(user_id=user.id, limit=limit)
+    return ResponseMessage[SyncCommandsResponse](data=result)
+
+
+@router.post("/commands/ack", response_model=ResponseMessage[SyncAckResponse])
+async def ack_sync_command(
+    body: SyncAckRequest,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> ResponseMessage[SyncAckResponse]:
+    """
+    Подтверждение выполнения команды синхронизации
+    """
+    result = await sync_service.ack_command(user_id=user.id, command_id=body.command_id, status=body.status)
+    return ResponseMessage[SyncAckResponse](data=result)
+
+
+@router.get("/structure", response_model=ResponseMessage[StructureResponse])
+async def get_sync_structure(
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> ResponseMessage[StructureResponse]:
+    """
+    Получение списка пространств с файлами пользователя
+    """
+    result = await sync_service.get_namespaces_with_files(user_id=user.id)
+    return ResponseMessage[StructureResponse](data=result)
+
+
+@router.delete("/files/{user_file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_sync_file(
+    user_file_id: int,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+):
+    """
+    Удаление файла на сервере
+    """
+
+    await sync_service.apply_desktop_delete(
+        user_id=user.id,
+        user_file_id=user_file_id,
+    )
+
+
+@router.put("/files/{user_file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def rename_sync_file(
+    user_file_id: int,
+    new_name: str,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> None:
+    """
+    Переименование файла на сервере
+    """
+
+    await sync_service.apply_desktop_rename(
+        user_id=user.id,
+        user_file_id=user_file_id,
+        new_name=new_name,
+    )
+
+
+@router.put("/files/{user_file_id}/move", status_code=status.HTTP_204_NO_CONTENT)
+async def move_sync_file(
+    user_file_id: int,
+    namespace_id: int,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> None:
+    """
+    Перемещение файла на сервере в указанное пространство
+    """
+
+    await sync_service.apply_desktop_move(
+        user_id=user.id,
+        user_file_id=user_file_id,
+        namespace_id=namespace_id,
+    )
+

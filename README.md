@@ -122,35 +122,38 @@ pytest tests/
 
 ### Загрузка файлов
 
-**Для всех источников (Telegram и Desktop Watcher):**
 ```bash
 curl -X POST http://localhost:8000/api/v1/files/upload \
+  -H "Authorization: Bearer <your_jwt_token>" \
   -F "file=@document.pdf" \
-  -F "namespace_id=1" \
-  -F "user_id=1"
+  -F "namespace_id=1"
 ```
 
-**Для Telegram бота (синхронизация с локальным диском):**
+**Desktop Watcher** использует отдельный эндпоинт с watcher-токеном:
 ```bash
-# После /upload вызовите /sync-to-local
-curl -X POST http://localhost:8000/api/v1/files/sync-to-local \
-  -H "Content-Type: application/json" \
-  -d '{"file_id": 42, "user_id": 1, "local_path": null}'
+curl -X POST http://localhost:8000/api/v1/sync/upload \
+  -F "token=<watcher_token>" \
+  -F "device_id=MY-PC" \
+  -F "vault_name=MyVault" \
+  -F "relative_path=subfolder/document.md" \
+  -F "content_hash=<sha256>" \
+  -F "desktop_updated_at=2026-01-01T12:00:00Z" \
+  -F "file=@document.md"
 ```
-
-📖 **Подробнее:** [FILE_UPLOAD_ARCHITECTURE.md](./FILE_UPLOAD_ARCHITECTURE.md)
 
 ### Скачивание файла
 
 ```bash
-curl -X GET "http://localhost:8000/api/v1/files/download/1?user_id=1" \
+curl -X GET "http://localhost:8000/api/v1/files/download/1" \
+  -H "Authorization: Bearer <your_jwt_token>" \
   --output downloaded_file.pdf
 ```
 
 ### Удаление файла
 
 ```bash
-curl -X DELETE "http://localhost:8000/api/v1/files/1?user_id=1"
+curl -X DELETE "http://localhost:8000/api/v1/files/1" \
+  -H "Authorization: Bearer <your_jwt_token>"
 ```
 
 ---

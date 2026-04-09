@@ -11,6 +11,7 @@ from app.schemas.base import ResponseMessage
 from app.schemas.file import (
     FileResponse,
     FileInfo,
+    FileVersionInfo,
 )
 from app.schemas.content import AttachFileRequest, AttachFileResponse
 from app.services.file_service import FileService
@@ -19,6 +20,7 @@ from app.services.namespace_service import NamespaceService
 from app.core.dependencies import (
     get_file_service,
     get_current_user,
+    get_current_user_or_watcher,
     get_summary_service,
     get_namespace_service,
     get_task_publisher,
@@ -148,10 +150,20 @@ async def get_file_info(
     return ResponseMessage[FileInfo](data=file_info)
 
 
+@router.get("/{file_id}/version", response_model=ResponseMessage[FileVersionInfo])
+async def get_file_version(
+    file_id: int,
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+) -> ResponseMessage[FileVersionInfo]:
+    version = await file_service.get_file_version(file_id=file_id, user_id=user.id)
+    return ResponseMessage[FileVersionInfo](data=version)
+
+
 @router.head("/download/{file_id}")
 async def head_download_file(
     file_id: int,
-    user: UserResponse = Depends(get_current_user),
+    user: UserResponse = Depends(get_current_user_or_watcher),
     file_service: FileService = Depends(get_file_service),
 ):
     """
@@ -163,6 +175,7 @@ async def head_download_file(
         file_id=file_id,
         user_id=user.id,
     )
+    file_info = await file_service.get_file_info(file_id=file_id, user_id=user.id)
 
     filename = decode_filename(filename)
 
@@ -171,6 +184,7 @@ async def head_download_file(
         headers={
             "Content-Disposition": encode_filename_for_header(filename),
             "Content-Length": str(len(file_content)),
+            "ETag": file_info.content_hash or "",
         },
     )
 
@@ -178,14 +192,14 @@ async def head_download_file(
 @router.get("/download/{file_id}")
 async def download_file(
     file_id: int,
-    user: UserResponse = Depends(get_current_user),
+    user: UserResponse = Depends(get_current_user_or_watcher),
     file_service: FileService = Depends(get_file_service),
 ):
     """
     Скачивает файл из хранилища.
-    
-    Аутентификация: По Telegram ID
-    
+
+    Аутентификация: заголовок Authorization: Bearer — JWT или токен Desktop Watcher.
+
     Args:
         file_id: ID файла
         user: UserResponse с информацией о пользователе
@@ -202,6 +216,7 @@ async def download_file(
         file_id=file_id,
         user_id=user.id,
     )
+    file_info = await file_service.get_file_info(file_id=file_id, user_id=user.id)
     
     filename = decode_filename(filename)
     
@@ -211,6 +226,7 @@ async def download_file(
         headers={
             "Content-Disposition": encode_filename_for_header(filename),
             "Content-Length": str(len(file_content)),
+            "ETag": file_info.content_hash or "",
         }
     )
 
@@ -219,6 +235,8 @@ async def download_file(
 async def replace_file_content(
     file_id: int,
     file: UploadFile = File(..., description="Новое содержимое файла"),
+    base_hash: Optional[str] = Form(None, description="SHA256 файла на момент открытия редактора"),
+    force_overwrite: bool = Form(False, description="Разрешить осознанную перезапись при конфликте"),
     user: UserResponse = Depends(get_current_user),
     file_service: FileService = Depends(get_file_service),
 ) -> ResponseMessage[FileInfo]:
@@ -238,6 +256,8 @@ async def replace_file_content(
         user_id=user.id,
         file_content=file_content,
         filename=filename,
+        base_hash=base_hash,
+        force_overwrite=force_overwrite,
     )
     return ResponseMessage[FileInfo](status="success", data=file_info)
 
@@ -249,7 +269,7 @@ async def delete_file(
     file_service: FileService = Depends(get_file_service),
 ):
     """
-    Удаляет файл из хранилища и базы данных.
+    Перемещает файл в корзину.
     
     Аутентификация: JWT.
     
@@ -300,18 +320,8 @@ async def move_file_to_namespace(
     )
     return ResponseMessage[FileInfo](
         message=f"Файл {file_info.user_file_id} перемещен в пространство {namespace_id}",
-        data=FileInfo(
-                user_file_id=file_info.user_file_id,
-                content_file_id=file_info.content_file_id,
-                user_id=file_info.user_id,
-                namespace_id=file_info.namespace_id,
-                filename=file_info.filename,
-                file_type=file_info.file_type,
-                file_size=file_info.file_size,
-                created_at=file_info.created_at,
-                updated_at=file_info.updated_at,
-                file_path=file_info.file_path,
-    ))
+        data=file_info,
+    )
 
 
 @router.post(

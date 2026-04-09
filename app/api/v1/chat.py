@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Query, Form, status
 from app.schemas.user import UserResponse
 from app.schemas.base import HistoryMessage, ResponseMessage, ListResponseData, PaginationInfo
 from app.schemas.chat import ChatListItem, ChatMessageItem, ChatUpdate
+from app.schemas.file import RawFileUpload
 from app.core.dependencies import get_current_user, get_chat_service
 from app.core.exceptions import NotFoundError
 from app.services.chat_service import ChatService
@@ -31,11 +32,16 @@ async def ask(
     chat_name: Optional[str] = Query(None, description="Название чата (при создании нового)"),
     chat_service: ChatService = Depends(get_chat_service),
 ) -> ResponseMessage[AskResponse]:
-    files_data: list[tuple[bytes, str]] = []
+    files_data: list[RawFileUpload] = []
     for upload in files:
         content = await upload.read()
         name = decode_filename(upload.filename or "unnamed_file")
-        files_data.append((content, name))
+        files_data.append(RawFileUpload(
+            content=content,
+            filename=name,
+            content_type=upload.content_type,
+            size=len(content),
+        ))
 
     parsed_history: List[HistoryMessage] = []
     if history:

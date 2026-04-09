@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Integer, BigInteger, DateTime, JSON, ForeignKey, Text, Boolean, UniqueConstraint, Index
+from sqlalchemy import String, Integer, DateTime, JSON, ForeignKey, Text, Boolean, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 from app.infrastructure.db.base import Base
+from app.schemas.file import CommandType, CommandStatus
 
 
 class User(Base):
@@ -30,18 +31,48 @@ class User(Base):
 
 class Namespace(Base):
     __tablename__ = "namespaces"
+    __table_args__ = (
+        Index(
+            "uq_namespaces_root_name",
+            "user_id", "name",
+            unique=True,
+            postgresql_where="parent_id IS NULL",
+        ),
+        Index(
+            "uq_namespaces_child_name",
+            "user_id", "parent_id", "name",
+            unique=True,
+            postgresql_where="parent_id IS NOT NULL",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id"), nullable=False, index=True
     )
+    parent_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("namespaces.id"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="regular", index=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
 
     user: Mapped["User"] = relationship("User", back_populates="namespaces")
+    parent: Mapped[Optional["Namespace"]] = relationship(
+        "Namespace",
+        remote_side="Namespace.id",
+        back_populates="children",
+        foreign_keys=[parent_id],
+    )
+    children: Mapped[list["Namespace"]] = relationship(
+        "Namespace",
+        back_populates="parent",
+        cascade="all, delete-orphan",
+        single_parent=True,
+    )
     user_files: Mapped[list["UserFile"]] = relationship(
         "UserFile", back_populates="namespace", cascade="all, delete-orphan"
     )
@@ -104,6 +135,17 @@ class UserFile(Base):
         Integer, ForeignKey("namespaces.id"), nullable=True, index=True
     )
     custom_title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    vault_relative_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+    desktop_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    app_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_update_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    is_conflict_copy: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    conflict_origin_user_file_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("user_files.id"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
@@ -113,6 +155,30 @@ class UserFile(Base):
     namespace: Mapped[Optional["Namespace"]] = relationship(
         "Namespace", back_populates="user_files"
     )
+    conflict_origin: Mapped[Optional["UserFile"]] = relationship(
+        "UserFile",
+        remote_side="UserFile.id",
+        foreign_keys=[conflict_origin_user_file_id],
+    )
+
+
+class SyncCommand(Base):
+    __tablename__ = "sync_commands"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
+    user_file_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("user_files.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    command_type: Mapped[CommandType] = mapped_column(String(32), nullable=False, index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[CommandStatus] = mapped_column(String(32), nullable=False, default=CommandStatus.PENDING.value, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False, index=True
+    )
+    acked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class VectorEmbedding(Base):
@@ -171,6 +237,7 @@ class Chat(Base):
     )
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     pending_action: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    context: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
