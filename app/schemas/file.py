@@ -69,7 +69,7 @@ class FileInfo(BaseModel):
     desktop_updated_at: Optional[datetime] = None
     app_updated_at: Optional[datetime] = None
     last_update_source: Optional[str] = None
-    content_hash: Optional[str] = None
+    content_hash: str
     vault_relative_path: Optional[str] = None
     is_conflict_copy: bool = False
 
@@ -151,32 +151,11 @@ class FileStructureItem(BaseModel):
     filename: str = Field(..., description="Имя файла")
     file_size: int = Field(..., description="Размер в байтах")
     updated_at: datetime = Field(..., description="Время последнего обновления для сравнения с локальным")
-    content_hash: Optional[str] = Field(None, description="SHA256 содержимого файла для сравнения")
-    vault_relative_path: Optional[str] = Field(None, description="Относительный путь файла в desktop vault")
+    content_hash: str = Field(..., description="SHA256 содержимого файла для сравнения")
 
     class Config:
         from_attributes = True
 
-
-class NamespaceStructureItem(BaseModel):
-    """Элемент структуры: namespace как «папка» с файлами"""
-    id: int = Field(..., description="ID пространства знаний")
-    name: str = Field(..., description="Имя пространства (имя папки на диске)")
-    parent_id: Optional[int] = Field(None, description="ID родительского пространства")
-    kind: str = Field("regular", description="Тип пространства: regular, inbox, trash, vault_root")
-    files: list[FileStructureItem] = Field(default_factory=list, description="Файлы в этом пространстве")
-    children: list["NamespaceStructureItem"] = Field(default_factory=list, description="Дочерние пространства")
-
-    class Config:
-        from_attributes = True
-
-
-class StructureResponse(BaseModel):
-    """Список пространств с файлами пользователя"""
-    namespaces: list[NamespaceStructureItem] = Field(
-        default_factory=list,
-        description="Список пространств с файлами (плоский список, без вложенности)",
-    )
 
 class FileVersionInfo(BaseModel):
     """Минимальная информация о версии файла для pre-save check."""
@@ -186,7 +165,7 @@ class FileVersionInfo(BaseModel):
     desktop_updated_at: Optional[datetime] = None
     app_updated_at: Optional[datetime] = None
     last_update_source: Optional[str] = None
-    content_hash: Optional[str] = None
+    content_hash: str
     vault_relative_path: Optional[str] = None
 
 
@@ -202,7 +181,6 @@ class SyncUploadRequest(BaseModel):
     vault_name: Optional[str] = Field(None, description="Имя корневой папки vault на ПК")
     vault_relative_path: str = Field(..., description="Путь файла относительно desktop vault")
     filename: str = Field(..., description="Имя файла")
-    content_hash: Optional[str] = Field(None, description="SHA256 содержимого файла от watcher")
     file_bytes: bytes = Field(..., description="Содержимое файла в виде bytes")
 
 class SyncUploadResponse(BaseModel):
@@ -237,10 +215,6 @@ class SyncCommandItem(BaseModel):
     created_at: datetime
 
 
-class SyncCommandsResponse(BaseModel):
-    """Список ожидающих sync-команд."""
-    commands: list[SyncCommandItem] = Field(default_factory=list)
-
 class SyncAckRequest(BaseModel):
     """Подтверждение выполнения команд watcher'ом."""
     command_id: int = Field(..., description="ID команды")
@@ -254,6 +228,3 @@ class SyncAckResponse(BaseModel):
     command_type: CommandType
     status: CommandStatus
 
-
-
-NamespaceStructureItem.model_rebuild()

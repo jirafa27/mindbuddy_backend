@@ -1,8 +1,8 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 from typing import Optional, List
 
-from app.schemas.file import FileWithUrl
+from app.schemas.file import FileStructureItem, FileWithUrl
 
 
 class NamespaceCreate(BaseModel):
@@ -10,6 +10,28 @@ class NamespaceCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Название namespace")
     description: Optional[str] = Field(None, max_length=1000, description="Описание namespace")
     parent_id: Optional[int] = Field(None, description="ID родительского пространства")
+
+
+class SyncNamespaceCreate(BaseModel):
+    """Схема создания namespace для desktop sync."""
+    name: Optional[str] = Field(None, min_length=1, max_length=255, description="Название namespace")
+    vault_name: Optional[str] = Field(None, min_length=1, max_length=255, description="Имя корневого vault")
+    description: Optional[str] = Field(None, max_length=1000, description="Описание namespace")
+    parent_id: Optional[int] = Field(None, description="ID родительского пространства")
+    relative_path: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=1024,
+        description="Относительный путь namespace внутри vault для sync-сценариев",
+    )
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "SyncNamespaceCreate":
+        if self.relative_path:
+            return self
+        if self.name:
+            return self
+        raise ValueError("Нужно передать либо name, либо relative_path")
 
 
 class NamespaceUpdate(BaseModel):
@@ -58,6 +80,20 @@ class NamespaceTreeItem(BaseModel):
     created_at: datetime
     files_count: int = 0
     children: List["NamespaceTreeItem"] = Field(default_factory=list)
+
+
+class NamespaceStructureItem(BaseModel):
+    """Элемент структуры: namespace как «папка» с файлами"""
+    id: int = Field(..., description="ID пространства знаний")
+    name: str = Field(..., description="Имя пространства (имя папки на диске)")
+    parent_id: Optional[int] = Field(None, description="ID родительского пространства")
+    kind: str = Field("regular", description="Тип пространства: regular, inbox, trash")
+    files: list[FileStructureItem] = Field(default_factory=list, description="Файлы в этом пространстве")
+
+    class Config:
+        from_attributes = True
+
+
 
 
 NamespaceTreeItem.model_rebuild()

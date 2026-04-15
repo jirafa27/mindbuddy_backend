@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional, Sequence
 
 from sqlalchemy import select, delete, func, text
@@ -111,12 +112,26 @@ class PgUserFileRepository:
         file_id: int,
         namespace_id: Optional[int] = None,
         custom_title: Optional[str] = None,
+        vault_relative_path: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+        desktop_updated_at: Optional[datetime] = None,
+        app_updated_at: Optional[datetime] = None,
+        last_update_source: Optional[str] = None,
+        is_conflict_copy: bool = False,
+        conflict_origin_user_file_id: Optional[int] = None,
     ) -> UserFileEntity:
         row = UserFile(
             user_id=user_id,
             file_id=file_id,
             namespace_id=namespace_id,
             custom_title=custom_title,
+            vault_relative_path=vault_relative_path,
+            updated_at=updated_at,
+            desktop_updated_at=desktop_updated_at,
+            app_updated_at=app_updated_at,
+            last_update_source=last_update_source,
+            is_conflict_copy=is_conflict_copy,
+            conflict_origin_user_file_id=conflict_origin_user_file_id,
         )
         self.db.add(row)
         await self.db.flush()
@@ -131,6 +146,22 @@ class PgUserFileRepository:
         row = result.scalar_one_or_none()
         if row is None:
             return None
+        if row.namespace_id == namespace_id:
+            return self._to_entity(row)
+
+        duplicate = await self.db.execute(
+            select(UserFile).where(
+                UserFile.user_id == row.user_id,
+                UserFile.file_id == row.file_id,
+                UserFile.namespace_id == namespace_id,
+                UserFile.id != row.id,
+            )
+        )
+        duplicate_row = duplicate.scalar_one_or_none()
+        if duplicate_row is not None:
+            await self.db.delete(row)
+            await self.db.flush()
+            return self._to_entity(duplicate_row)
         row.namespace_id = namespace_id
         await self.db.flush()
         return self._to_entity(row)
@@ -159,5 +190,38 @@ class PgUserFileRepository:
         if row is None:
             return None
         row.custom_title = new_title
+        await self.db.flush()
+        return self._to_entity(row)
+
+    async def update_sync_metadata(
+        self,
+        user_file_id: int,
+        *,
+        file_id: Optional[int] = None,
+        custom_title: Optional[str] = None,
+        vault_relative_path: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+        desktop_updated_at: Optional[datetime] = None,
+        app_updated_at: Optional[datetime] = None,
+        last_update_source: Optional[str] = None,
+    ) -> Optional[UserFileEntity]:
+        result = await self.db.execute(select(UserFile).where(UserFile.id == user_file_id))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        if file_id is not None:
+            row.file_id = file_id
+        if custom_title is not None:
+            row.custom_title = custom_title
+        if vault_relative_path is not None:
+            row.vault_relative_path = vault_relative_path
+        if updated_at is not None:
+            row.updated_at = updated_at
+        if desktop_updated_at is not None:
+            row.desktop_updated_at = desktop_updated_at
+        if app_updated_at is not None:
+            row.app_updated_at = app_updated_at
+        if last_update_source is not None:
+            row.last_update_source = last_update_source
         await self.db.flush()
         return self._to_entity(row)

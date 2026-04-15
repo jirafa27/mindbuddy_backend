@@ -1,4 +1,5 @@
 from typing import Any, Dict, Protocol, Optional, List, Tuple, Sequence
+from datetime import datetime
 
 from app.domain.entities import (
     FileEntity,
@@ -147,7 +148,20 @@ class UserFileRepository(Protocol):
         """user_files.id в пространстве пользователя (порядок — по created_at)."""
         ...
 
-    async def create(self, user_file: UserFileEntity) -> UserFileEntity:
+    async def create(
+        self,
+        user_id: int,
+        file_id: int,
+        namespace_id: Optional[int] = None,
+        custom_title: Optional[str] = None,
+        vault_relative_path: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+        desktop_updated_at: Optional[datetime] = None,
+        app_updated_at: Optional[datetime] = None,
+        last_update_source: Optional[str] = None,
+        is_conflict_copy: bool = False,
+        conflict_origin_user_file_id: Optional[int] = None,
+    ) -> UserFileEntity:
         ...
 
     async def delete(self, user_file_id: int) -> None:
@@ -175,6 +189,21 @@ class UserFileRepository(Protocol):
 
     async def update_custom_title(self, user_file_id: int, new_title: str) -> Optional[UserFileEntity]:
         """Обновляет отображаемое имя файла (custom_title)."""
+        ...
+
+    async def update_sync_metadata(
+        self,
+        user_file_id: int,
+        *,
+        file_id: Optional[int] = None,
+        custom_title: Optional[str] = None,
+        vault_relative_path: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+        desktop_updated_at: Optional[datetime] = None,
+        app_updated_at: Optional[datetime] = None,
+        last_update_source: Optional[str] = None,
+    ) -> Optional[UserFileEntity]:
+        """Обновляет sync-связанные поля user_file."""
         ...
 
 
@@ -239,6 +268,9 @@ class NamespaceRepository(Protocol):
         ...
 
     async def delete(self, id: int) -> None:
+        ...
+
+    async def get_namespaces_with_files(self, user_id: int) -> List[NamespaceEntity]:
         ...
 
 
@@ -409,7 +441,7 @@ class SyncRepository(Protocol):
         self,
         *,
         user_id: int,
-        user_file_id: int,
+        user_file_id: Optional[int],
         command_type: str,
         payload_json: dict,
         status: str = "pending",
@@ -430,10 +462,6 @@ class SyncRepository(Protocol):
         self, command_id: int, user_id: int, status: str
     ) -> Optional[SyncCommandEntity]:
         ...
-
-    async def get_namespaces_with_files(self, user_id: int) -> List[Any]:
-        ...
-
 
 class FileSyncNotifier(Protocol):
     """Протокол для уведомления подсистемы синхронизации об изменениях файлов.
@@ -469,6 +497,15 @@ class FileSyncNotifier(Protocol):
         new_title: str,
     ) -> Any:
         """Добавляет команду на переименование файла в очередь синхронизации."""
+        ...
+
+    async def add_delete_namespace_command_to_queue(
+        self,
+        *,
+        namespace_id: int,
+        user_id: int,
+    ) -> Any:
+        """Добавляет команду на удаление namespace в очередь синхронизации."""
         ...
 
     async def get_file_version(

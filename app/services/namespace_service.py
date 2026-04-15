@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.protocols import NamespaceRepository, UserFileRepository, FileSyncNotifier
 from app.core.exceptions import NotFoundError, ValidationError, ForbiddenError
 from app.domain.entities.namespace import NamespaceEntity, NamespaceFileItem
+from app.schemas.file import FileStructureItem
+from app.schemas.namespace import NamespaceStructureItem
 
 class NamespaceService:
     """Сервис для работы с namespace"""
@@ -154,33 +157,7 @@ class NamespaceService:
         await self.db.commit()
         return namespace.id
 
-    async def get_or_create_namespace_path(
-        self,
-        user_id: int,
-        vault_name: str,
-        parts: list[str],
-    ) -> int:
-        current_id = await self.get_or_create_vault_root_namespace(user_id=user_id, vault_name=vault_name)
-        for part in parts:
-            existing = await self.namespace_repository.get_by_name_and_parent(
-                user_id=user_id,
-                parent_id=current_id,
-                name=part,
-            )
-            if existing:
-                current_id = existing.id
-                continue
-            created = await self.namespace_repository.create(
-                name=part,
-                user_id=user_id,
-                parent_id=current_id,
-                kind=self.regular_namespace_kind,
-                description=None,
-            )
-            current_id = created.id
-        await self.db.commit()
-        return current_id
-
+    
     async def get_descendant_ids(self, *, user_id: int, namespace_id: int) -> list[int]:
         namespace = await self.get_namespace(namespace_id=namespace_id, user_id=user_id)
         ids = await self.namespace_repository.get_descendant_ids(
@@ -310,16 +287,61 @@ class NamespaceService:
                 namespace_id=namespace_id,
             )
             for file_id in file_ids:
-                updated = await self.user_file_repository.update_namespace(
-                    file_id,
-                    trash_namespace_id,
-                )
-                if updated and self.sync_notifier:
+                if self.sync_notifier:
                     await self.sync_notifier.add_trash_command_to_queue(
-                        user_file_id=updated.id,
+                        user_file_id=file_id,
                         user_id=user_id,
                     )
+                else:
+                    await self.user_file_repository.update_namespace(
+                        file_id,
+                        trash_namespace_id,
+                    )
+
+        if self.sync_notifier:
+            await self.sync_notifier.add_delete_namespace_command_to_queue(
+                namespace_id=namespace_id,
+                user_id=user_id,
+            )
 
         await self.namespace_repository.delete(namespace_id)
         await self.db.commit()
         return namespace
+
+    
+    
+    
+    async def get_namespaces_with_files(self, *, user_id: int) -> list[NamespaceStructureItem]:
+        """
+        Получение списка пространств с файлами пользователя
+        Args:
+            user_id: ID пользователя
+        Returns:
+            list[NamespaceStructureItem]: Список пространств с файлами пользователя
+        """
+        namespaces = await self.namespace_repository.get_namespaces_with_files(user_id)
+        items: list[NamespaceStructureItem] = []
+        for ns in namespaces:
+            files: list[FileStructureItem] = []
+            for uf in ns.user_files:
+                if uf.is_conflict_copy:
+                    continue
+                files.append(
+                    FileStructureItem(
+                        id=uf.id,
+                        filename=uf.filename or "document",
+                        file_size=uf.file_size,
+                        updated_at=uf.updated_at or uf.created_at or datetime.utcnow(),
+                        content_hash=uf.content_hash,
+                    )
+                )
+            items.append(
+                NamespaceStructureItem(
+                    id=ns.id,
+                    name=ns.name,
+                    parent_id=ns.parent_id,
+                    kind="regular" if ns.kind == self.vault_root_namespace_kind else ns.kind,
+                    files=files,
+                )
+            )
+        return items

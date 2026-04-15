@@ -5,16 +5,18 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from app.core.dependencies import (
     get_sync_service,
     get_user_by_watcher_token,
+    get_namespace_service,
 )
+from app.services.namespace_service import NamespaceService
 from app.schemas.base import ResponseMessage
 from app.schemas.file import (
-    StructureResponse,
     SyncAckRequest,
     SyncAckResponse,
-    SyncCommandsResponse,
+    SyncCommandItem,
     SyncUploadRequest,
     SyncUploadResponse,
 )
+from app.schemas.namespace import SyncNamespaceCreate, NamespaceStructureItem
 from app.schemas.user import UserResponse
 from app.services.sync_service import SyncService
 
@@ -26,7 +28,6 @@ async def sync_upload(
     relative_path: str = Form(...),
     vault_name: str = Form("Vault"),
     user_file_id: Optional[int] = Form(None),
-    content_hash: Optional[str] = Form(None),
     file: UploadFile = File(...),
     user: UserResponse = Depends(get_user_by_watcher_token),
     sync_service: SyncService = Depends(get_sync_service),
@@ -42,7 +43,6 @@ async def sync_upload(
         vault_name=vault_name,
         vault_relative_path=relative_path,
         filename=filename,
-        content_hash=content_hash,
         file_bytes=upload_bytes,
     )
     result = await sync_service.upload_file(
@@ -52,17 +52,17 @@ async def sync_upload(
     return ResponseMessage[SyncUploadResponse](data=result)
 
 
-@router.get("/commands", response_model=ResponseMessage[SyncCommandsResponse])
+@router.get("/commands", response_model=ResponseMessage[list[SyncCommandItem]])
 async def get_sync_commands(
     limit: int = 100,
     user: UserResponse = Depends(get_user_by_watcher_token),
     sync_service: SyncService = Depends(get_sync_service),
-) -> ResponseMessage[SyncCommandsResponse]:
+) -> ResponseMessage[list[SyncCommandItem]]:
     """
     Получение списка команд синхронизации, ожидающих выполнения
     """
     result = await sync_service.list_pending_commands(user_id=user.id, limit=limit)
-    return ResponseMessage[SyncCommandsResponse](data=result)
+    return ResponseMessage[list[SyncCommandItem]](data=result)
 
 
 @router.post("/commands/ack", response_model=ResponseMessage[SyncAckResponse])
@@ -78,16 +78,39 @@ async def ack_sync_command(
     return ResponseMessage[SyncAckResponse](data=result)
 
 
-@router.get("/structure", response_model=ResponseMessage[StructureResponse])
+@router.get("/structure", response_model=ResponseMessage[list[NamespaceStructureItem]])
 async def get_sync_structure(
     user: UserResponse = Depends(get_user_by_watcher_token),
-    sync_service: SyncService = Depends(get_sync_service),
-) -> ResponseMessage[StructureResponse]:
+    namespace_service: NamespaceService = Depends(get_namespace_service),
+) -> ResponseMessage[list[NamespaceStructureItem]]:
     """
     Получение списка пространств с файлами пользователя
     """
-    result = await sync_service.get_namespaces_with_files(user_id=user.id)
-    return ResponseMessage[StructureResponse](data=result)
+    result = await namespace_service.get_namespaces_with_files(user_id=user.id)
+    return ResponseMessage[list[NamespaceStructureItem]](data=result)
+
+@router.post(
+    "/namespaces",
+    response_model=ResponseMessage[NamespaceStructureItem],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_sync_namespace(
+    body: SyncNamespaceCreate,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> ResponseMessage[NamespaceStructureItem]:
+    """
+    Создание пространства на сервере по запросу watcher'а.
+    """
+    result = await sync_service.create_desktop_namespace(
+        user_id=user.id,
+        name=body.name,
+        vault_name=body.vault_name,
+        parent_id=body.parent_id,
+        description=body.description,
+        relative_path=body.relative_path,
+    )
+    return ResponseMessage[NamespaceStructureItem](data=result)
 
 
 @router.delete("/files/{user_file_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -103,6 +126,22 @@ async def delete_sync_file(
     await sync_service.apply_desktop_delete(
         user_id=user.id,
         user_file_id=user_file_id,
+    )
+
+
+@router.delete("/namespaces/{namespace_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_sync_namespace(
+    namespace_id: int,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    sync_service: SyncService = Depends(get_sync_service),
+) -> None:
+    """
+    Полное удаление пространства и всех пользовательских файлов в нём на сервере.
+    Используется watcher'ом при удалении папки на ПК.
+    """
+    await sync_service.apply_desktop_delete_namespace(
+        user_id=user.id,
+        namespace_id=namespace_id,
     )
 
 

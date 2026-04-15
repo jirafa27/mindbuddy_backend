@@ -47,6 +47,7 @@ from app.services.search_service import SearchService
 from app.utils.file_readers import FileReaderFactory
 from app.core.config import settings
 from app.services.chat_service import ChatService
+from app.services.file_content_service import FileContentService
 from app.services.content_extractor import ContentExtractorService
 from app.services.summary_service import SummaryService
 from app.graph.nodes.summary_agent import SummaryAgent
@@ -139,6 +140,17 @@ def get_storage_service() -> FileStorage:
     return _get_minio_storage()
 
 
+def get_file_content_service(
+    storage: FileStorage = Depends(get_storage_service),
+    file_reader_factory: FileReaderFactory = Depends(get_file_reader_factory),
+) -> FileContentService:
+    """Провайдер FileContentService для чтения текста из файлов."""
+    return FileContentService(
+        storage=storage,
+        file_reader_factory=file_reader_factory,
+    )
+
+
 def get_summary_repository(db: AsyncSession = Depends(get_db)) -> SummaryRepository:
     """Провайдер для SummaryRepository. Возвращает протокол, создаёт Pg-реализацию."""
     return PgSummaryRepository(db)
@@ -156,20 +168,6 @@ def get_sync_repository(db: AsyncSession = Depends(get_db)) -> SyncRepository:
 
 
 
-def get_namespace_service(
-    db: AsyncSession = Depends(get_db),
-    namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
-    user_file_repository: UserFileRepository = Depends(get_user_file_repository),
-    sync_notifier: SyncService = Depends(get_sync_service),
-) -> NamespaceService:
-    """Провайдер для NamespaceService"""
-    return NamespaceService(
-        namespace_repository,
-        db,
-        user_file_repository=user_file_repository,
-        sync_notifier=sync_notifier,
-    )
-
 def get_sync_service(
     storage: FileStorage = Depends(get_storage_service),
     user_file_repository: UserFileRepository = Depends(get_user_file_repository),
@@ -180,6 +178,7 @@ def get_sync_service(
     sync_repository: SyncRepository = Depends(get_sync_repository),
     task_publisher: TaskPublisher = Depends(get_task_publisher),
     file_reader_factory: FileReaderFactory = Depends(get_file_reader_factory),
+    file_content_service: FileContentService = Depends(get_file_content_service),
     db: AsyncSession = Depends(get_db),
 ) -> SyncService:
     return SyncService(
@@ -193,6 +192,22 @@ def get_sync_service(
         summary_repository=summary_repository,
         task_publisher=task_publisher,
         file_reader_factory=file_reader_factory,
+        file_content_service=file_content_service,
+    )
+
+
+def get_namespace_service(
+    db: AsyncSession = Depends(get_db),
+    namespace_repository: NamespaceRepository = Depends(get_namespace_repository),
+    user_file_repository: UserFileRepository = Depends(get_user_file_repository),
+    sync_notifier: SyncService = Depends(get_sync_service),
+) -> NamespaceService:
+    """Провайдер для NamespaceService"""
+    return NamespaceService(
+        namespace_repository,
+        db,
+        user_file_repository=user_file_repository,
+        sync_notifier=sync_notifier,
     )
 
 
@@ -208,6 +223,7 @@ def get_file_service(
     summary_repository: SummaryRepository = Depends(get_summary_repository),
     task_publisher: TaskPublisher = Depends(get_task_publisher),
     sync_notifier: SyncService = Depends(get_sync_service),
+    file_content_service: FileContentService = Depends(get_file_content_service),
     db: AsyncSession = Depends(get_db),
 ) -> FileService:
     return FileService(
@@ -222,21 +238,28 @@ def get_file_service(
         summary_repository=summary_repository,
         task_publisher=task_publisher,
         sync_notifier=sync_notifier,
+        file_content_service=file_content_service,
         db=db,
     )
 
 
 def create_file_service_for_celery(db: AsyncSession) -> FileService:
     """Создаёт FileService для Celery воркеров."""
+    storage = get_storage_service()
+    file_reader_factory = get_file_reader_factory()
     return FileService(
-        storage=get_storage_service(),
+        storage=storage,
         file_repository=PgFileRepository(db),
         user_file_repository=PgUserFileRepository(db),
-        file_reader_factory=get_file_reader_factory(),
+        file_reader_factory=file_reader_factory,
         vector_repository=PgVectorRepository(db),
         text_chunker=get_text_chunker_service(),
         embedding_service=get_embedding_service(),
         namespace_repository=PgNamespaceRepository(db),
+        file_content_service=FileContentService(
+            storage=storage,
+            file_reader_factory=file_reader_factory,
+        ),
         db=db,
     )
 
@@ -347,6 +370,7 @@ def get_summary_service(
     summary_repository: SummaryRepository = Depends(get_summary_repository),
     content_extractor: ContentExtractorService = Depends(get_content_extractor),
     file_service: FileService = Depends(get_file_service),
+    file_content_service: FileContentService = Depends(get_file_content_service),
 ) -> SummaryService:
     """Провайдер для SummaryService (без агента; дирижёр вызывает агента отдельно)."""
     return SummaryService(
@@ -355,6 +379,7 @@ def get_summary_service(
         file_repository=file_repository,
         summary_repository=summary_repository,
         file_service=file_service,
+        file_content_service=file_content_service,
         content_extractor=content_extractor,
     )
 
@@ -362,12 +387,18 @@ def get_summary_service(
 def create_summary_service_for_celery(db: AsyncSession) -> SummaryService:
     """Создаёт SummaryService для Celery воркеров (без агента)."""
     file_service = create_file_service_for_celery(db)
+    storage = get_storage_service()
+    file_reader_factory = get_file_reader_factory()
     return SummaryService(
         db=db,
         user_file_repository=PgUserFileRepository(db),
         file_repository=PgFileRepository(db),
         summary_repository=PgSummaryRepository(db),
         file_service=file_service,
+        file_content_service=FileContentService(
+            storage=storage,
+            file_reader_factory=file_reader_factory,
+        ),
         content_extractor=ContentExtractorService(),
     )
 

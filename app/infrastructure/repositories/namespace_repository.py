@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 from app.infrastructure.db.models import Namespace, UserFile
-from app.domain.entities import NamespaceEntity, NamespaceFileItem, UserFileEntity
+from app.domain.entities import NamespaceEntity, NamespaceFileItem
 
 
 class PgNamespaceRepository:
@@ -13,25 +13,11 @@ class PgNamespaceRepository:
     def _to_entity(
         self,
         model: Namespace,
-        user_files: Optional[List[UserFileEntity]] = None,
+        user_files: Optional[List[NamespaceFileItem]] = None,
     ) -> NamespaceEntity:
         if user_files is None:
             user_files = [
-                UserFileEntity(
-                    id=uf.id,
-                    user_id=uf.user_id,
-                    file_id=uf.file_id,
-                    namespace_id=uf.namespace_id,
-                    custom_title=uf.custom_title,
-                    vault_relative_path=uf.vault_relative_path,
-                    created_at=uf.created_at,
-                    updated_at=uf.updated_at,
-                    desktop_updated_at=uf.desktop_updated_at,
-                    app_updated_at=uf.app_updated_at,
-                    last_update_source=uf.last_update_source,
-                    is_conflict_copy=uf.is_conflict_copy,
-                    conflict_origin_user_file_id=uf.conflict_origin_user_file_id,
-                )
+                self._user_file_to_item(uf)
                 for uf in model.user_files
             ]
         return NamespaceEntity(
@@ -45,29 +31,32 @@ class PgNamespaceRepository:
             user_files=user_files,
         )
 
-    def _user_file_to_entity(self, model: UserFile) -> UserFileEntity:
-        return UserFileEntity(
+    def _user_file_to_item(self, model: UserFile) -> NamespaceFileItem:
+        content_file = model.file
+        if content_file is None or not content_file.content_hash:
+            raise ValueError(f"UserFile id={model.id} has no related content file with content_hash")
+        media_metadata = (content_file.media_metadata or {}) if content_file else {}
+        file_size = media_metadata.get("file_size")
+        if not isinstance(file_size, int):
+            file_size = len((content_file.transcript_text or "").encode("utf-8")) if content_file else 0
+
+        return NamespaceFileItem(
             id=model.id,
-            user_id=model.user_id,
-            file_id=model.file_id,
-            namespace_id=model.namespace_id,
-            custom_title=model.custom_title,
-            vault_relative_path=model.vault_relative_path,
+            file_path=content_file.file_path if content_file else None,
+            filename=(model.custom_title or media_metadata.get("title") or "document") or "document",
+            file_type=media_metadata.get("file_type") or "md",
+            file_size=file_size,
             created_at=model.created_at,
             updated_at=model.updated_at,
-            desktop_updated_at=model.desktop_updated_at,
-            app_updated_at=model.app_updated_at,
-            content_revision=model.content_revision,
-            last_update_source=model.last_update_source,
+            content_hash=content_file.content_hash,
             is_conflict_copy=model.is_conflict_copy,
-            conflict_origin_user_file_id=model.conflict_origin_user_file_id,
         )
 
     async def get_by_id(self, namespace_id: int) -> Optional[NamespaceEntity]:
         result = await self.db.execute(
             select(Namespace)
             .where(Namespace.id == namespace_id)
-            .options(selectinload(Namespace.user_files))
+            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
         )
         row = result.scalar_one_or_none()
         if row is None:
@@ -89,21 +78,7 @@ class PgNamespaceRepository:
             .options(selectinload(UserFile.file))
         )
         rows = result.scalars().all()
-        out = []
-        for uf in rows:
-            cf = uf.file
-            meta = (cf.media_metadata or {}) if cf else {}
-            out.append(
-                NamespaceFileItem(
-                    id=uf.id,
-                    file_path=cf.file_path if cf else None,
-                    filename=(uf.custom_title or meta.get("title") or "document") or "document",
-                    file_type=meta.get("file_type") or "md",
-                    file_size=0,
-                    created_at=uf.created_at,
-                )
-            )
-        return out
+        return [self._user_file_to_item(uf) for uf in rows]
 
     async def get_by_name_and_user(self, name: str, user_id: int) -> Optional[NamespaceEntity]:
         result = await self.db.execute(
@@ -113,7 +88,7 @@ class PgNamespaceRepository:
                 Namespace.user_id == user_id
             )
             .order_by(Namespace.created_at.asc())
-            .options(selectinload(Namespace.user_files))
+            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
             .limit(1)
         )
         row = result.scalar_one_or_none()
@@ -135,7 +110,7 @@ class PgNamespaceRepository:
                 Namespace.parent_id == parent_id,
                 Namespace.name == name,
             )
-            .options(selectinload(Namespace.user_files))
+            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
             .limit(1)
         )
         row = result.scalar_one_or_none()
@@ -158,7 +133,7 @@ class PgNamespaceRepository:
             .order_by(Namespace.created_at.desc())
             .offset(skip)
             .limit(limit)
-            .options(selectinload(Namespace.user_files))
+            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
         )
         rows = result.all()
         namespaces_with_count = [(self._to_entity(row[0]), row[1] or 0) for row in rows]
@@ -210,7 +185,7 @@ class PgNamespaceRepository:
                 Namespace.parent_id == parent_id,
             )
             .order_by(Namespace.name.asc(), Namespace.created_at.asc())
-            .options(selectinload(Namespace.user_files))
+            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
         )
         rows = result.scalars().unique().all()
         return [self._to_entity(row) for row in rows]

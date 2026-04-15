@@ -27,6 +27,7 @@ from app.core.exceptions import (
     ForbiddenError,
     FileTooLargeError,
 )
+from app.services.file_content_service import FileContentService
 from app.services.text_chunker import TextChunkerService
 from app.utils.file_readers import FileReaderFactory
 
@@ -50,6 +51,7 @@ class FileService:
         summary_repository: Optional[SummaryRepository] = None,
         task_publisher: Optional[TaskPublisher] = None,
         sync_notifier: Optional[FileSyncNotifier] = None,
+        file_content_service: Optional[FileContentService] = None,
     ):
         """
         Args:
@@ -77,6 +79,10 @@ class FileService:
         self.file_repository = file_repository
         self.user_file_repository = user_file_repository
         self.sync_notifier = sync_notifier
+        self.file_content_service = file_content_service or FileContentService(
+            storage=storage,
+            file_reader_factory=file_reader_factory,
+        )
 
     async def _get_or_create_trash_namespace_id(self, user_id: int) -> int:
         if not self.namespace_repository or not self.db:
@@ -126,7 +132,7 @@ class FileService:
             desktop_updated_at=getattr(user_file, "desktop_updated_at", None),
             app_updated_at=getattr(user_file, "app_updated_at", None),
             last_update_source=getattr(user_file, "last_update_source", None),
-            content_hash=getattr(content_file, "content_hash", None),
+            content_hash=content_file.content_hash,
             vault_relative_path=getattr(user_file, "vault_relative_path", None),
             is_conflict_copy=getattr(user_file, "is_conflict_copy", False),
         )
@@ -329,7 +335,11 @@ class FileService:
         Raises:
             ValidationError: При ошибке извлечения текста
         """
-        return self._extract_text_from_file(file_content, file_ext)
+        return self.file_content_service.extract_text(
+            file_content,
+            file_ext=file_ext,
+            strict=True,
+        )
 
     def _extract_text_from_file(self, file_content: bytes, file_ext: str) -> str:
         """
@@ -346,15 +356,11 @@ class FileService:
         Raises:
             ValidationError: При ошибке извлечения текста
         """
-        try:
-            reader = self.file_reader_factory.get_reader(file_ext)
-            return reader.read(file_content)
-        except UnicodeDecodeError:
-            raise ValidationError("File encoding not supported. Please use UTF-8 encoded files.")
-        except ValueError as e:
-            raise ValidationError(str(e))
-        except Exception as e:
-            raise ValidationError(f"Failed to extract text from file: {str(e)}")
+        return self.file_content_service.extract_text(
+            file_content,
+            file_ext=file_ext,
+            strict=True,
+        )
 
     def _get_content_type(self, file_ext: str) -> str:
         """
@@ -440,12 +446,13 @@ class FileService:
         if user_file.namespace_id == trash_namespace_id:
             raise ValidationError("Файл уже находится в корзине")
 
-        await self.user_file_repository.update_namespace(user_file.id, trash_namespace_id)
         if self.sync_notifier:
             await self.sync_notifier.add_trash_command_to_queue(
                 user_file_id=file_id,
                 user_id=user_id,
             )
+        else:
+            await self.user_file_repository.update_namespace(user_file.id, trash_namespace_id)
         await self.db.commit()
         return True
 
@@ -942,19 +949,21 @@ class FileService:
         existing = await self.user_file_repository.find_by_user_and_file(user_id, content_file_id)
         if existing:
             if existing.namespace_id != namespace_id:
-                await self.user_file_repository.update_namespace(existing.id, namespace_id)
+                moved = await self.user_file_repository.update_namespace(existing.id, namespace_id)
+                if not moved:
+                    raise NotFoundError(f"Файл с ID {existing.id} не найден")
                 if self.sync_notifier:
                     await self.sync_notifier.add_upsert_command_to_queue(
-                        user_file_id=existing.id,
+                        user_file_id=moved.id,
                         user_id=user_id,
                         command_type=CommandType.MOVE,
                     )
                 await self.db.commit()
                 logger.info(
                     "[FileService] Attach: moved existing user_file=%d to namespace=%d",
-                    existing.id, namespace_id,
+                    moved.id, namespace_id,
                 )
-                return await self.user_file_repository.get_by_id(existing.id)
+                return await self.user_file_repository.get_by_id(moved.id)
             logger.info("[FileService] Attach: user_file=%d already in namespace=%d", existing.id, namespace_id)
             return existing
 
@@ -993,13 +1002,13 @@ class FileService:
         content_file = await self.file_repository.get_by_id(uf.file_id)
         if not content_file or not content_file.file_path:
             raise ValueError("Файл или путь не найден")
-        file_content = await self.storage.download_file(content_file.file_path)
-        if not file_content:
-            raise ValueError("Не удалось загрузить файл из хранилища")
         meta = content_file.media_metadata or {}
         name_for_ext = uf.custom_title or meta.get("title") or "document"
-        file_ext = name_for_ext.rsplit(".", 1)[-1].lower() if "." in name_for_ext else "md"
-        text = self.extract_text(file_content, file_ext)
+        text = await self.file_content_service.get_text_content(
+            content_file,
+            filename=name_for_ext,
+            strict=True,
+        )
         if not text or not text.strip():
             raise ValueError("Не удалось извлечь текст из файла")
         return text
@@ -1076,17 +1085,19 @@ class FileService:
         if namespace.user_id != user_id:
             raise ForbiddenError("У вас нет доступа к этому пространству")
 
-        await self.user_file_repository.update_namespace(file.id, namespace_id)
+        moved = await self.user_file_repository.update_namespace(file.id, namespace_id)
+        if not moved:
+            raise NotFoundError(f"Файл с id {file_id} не найден")
         if self.sync_notifier:
             await self.sync_notifier.add_upsert_command_to_queue(
-                user_file_id=file.id,
+                user_file_id=moved.id,
                 user_id=user_id,
                 command_type=CommandType.MOVE,
             )
         await self.db.commit()
 
         logger.info("[FileService] Moved file %d to namespace %d", file_id, namespace_id)
-        return await self.get_file_info(file_id=file.id, user_id=user_id)
+        return await self.get_file_info(file_id=moved.id, user_id=user_id)
 
     async def rename_file(
         self,

@@ -33,7 +33,7 @@ class PgSyncRepository:
         self,
         *,
         user_id: int,
-        user_file_id: int,
+        user_file_id: Optional[int],
         command_type: str,
         payload_json: dict,
         status: str = "pending",
@@ -94,12 +94,4 @@ class PgSyncRepository:
         await self.db.flush()
         return self._cmd_to_entity(row)
 
-    async def get_namespaces_with_files(self, user_id: int) -> List[Namespace]:
-        result = await self.db.execute(
-            select(Namespace)
-            .where(Namespace.user_id == user_id)
-            .order_by(Namespace.created_at.asc(), Namespace.name.asc())
-            .options(selectinload(Namespace.user_files).selectinload(UserFile.file))
-        )
-        return list(result.scalars().unique().all())
 

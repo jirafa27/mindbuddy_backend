@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import SummaryMethod
 from app.domain.protocols import SummaryRepository, UserFileRepository, FileRepository
 from app.services.content_extractor import ContentExtractorService
+from app.services.file_content_service import FileContentService
 from app.services.file_service import FileService
 from app.schemas.summary import SummaryResponse, ContentToSummarize, SummaryResult
 from app.schemas.file import IngestUrlResult
@@ -18,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 class SummaryService:
     """
-    Сервис суммаризации: сам собирает контент для суммаризации, используя универсальные
-    методы FileService (get_file_text, upload_file, save_extracted_content) и логику дедупа.
-    FileService не знает о ContentToSummarize; SummaryService строит его из данных файлов.
+    Сервис суммаризации: собирает контент для суммаризации, используя
+    FileService для файловых операций высокого уровня и FileContentService
+    для чтения/извлечения текста из content-файлов.
     """
     
     def __init__(
@@ -30,6 +31,7 @@ class SummaryService:
         file_repository: FileRepository,
         summary_repository: SummaryRepository,
         file_service: FileService,
+        file_content_service: FileContentService,
         content_extractor: ContentExtractorService,
     ):
         self.db = db
@@ -37,6 +39,7 @@ class SummaryService:
         self.file_repository = file_repository
         self.summary_repository = summary_repository
         self.file_service = file_service
+        self.file_content_service = file_content_service
         self.content_extractor = content_extractor
 
     async def get_content_for_summarization_url(
@@ -147,7 +150,11 @@ class SummaryService:
             file_ext = self._MIME_TO_EXT.get(mime, "")
         if not file_ext:
             raise ValueError("Не удалось определить тип файла")
-        text = self.file_service.extract_text(file_content, file_ext)
+        text = self.file_content_service.extract_text(
+            file_content,
+            file_ext=file_ext,
+            strict=True,
+        )
         if not text or not text.strip():
             raise ValueError("Не удалось извлечь текст из файла")
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -248,11 +255,11 @@ class SummaryService:
         if not file_path:
             raise ValueError("Путь к файлу не найден")
         logger.info("[Summary] Loading file content from storage: %s", file_path)
-        file_content = await self.file_service.storage.download_file(file_path)
-        if not file_content:
-            raise ValueError("Не удалось загрузить файл из хранилища")
-        file_ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "md"
-        text = self.file_service.extract_text(file_content, file_ext)
+        text = await self.file_content_service.get_text_content(
+            cf,
+            filename=uf.custom_title or (cf.media_metadata or {}).get("title") or "document",
+            strict=True,
+        )
         if not text or not text.strip():
             raise ValueError("Не удалось извлечь текст из файла")
         filename = uf.custom_title or (cf.media_metadata or {}).get("title") or "document"
@@ -313,8 +320,10 @@ class SummaryService:
                 text = existing_file.transcript_text
             elif existing_file.file_path:
                 try:
-                    raw = await self.file_service.storage.download_file(existing_file.file_path)
-                    text = raw.decode("utf-8") if raw else None
+                    text = await self.file_content_service.get_text_content(
+                        existing_file,
+                        strict=False,
+                    ) or None
                 except Exception:
                     pass
             return ContentExtractResponse(
@@ -383,13 +392,11 @@ class SummaryService:
             text = cf.transcript_text
         elif cf.file_path:
             logger.info("[Summary] Loading content from storage: %s", cf.file_path)
-            file_content = await self.file_service.storage.download_file(cf.file_path)
-            if not file_content:
-                raise ValueError("Не удалось загрузить файл из хранилища")
-            meta = cf.media_metadata or {}
-            filename = meta.get("title") or "document.md"
-            file_ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "md"
-            text = self.file_service.extract_text(file_content, file_ext)
+            text = await self.file_content_service.get_text_content(
+                cf,
+                filename=(cf.media_metadata or {}).get("title") or "document.md",
+                strict=True,
+            )
         else:
             raise ValueError("Путь к файлу не найден и transcript_text отсутствует")
 
@@ -459,8 +466,11 @@ class SummaryService:
                 content_file = await self.file_repository.get_by_id(existing_uf.file_id)
                 if content_file and content_file.file_path:
                     logger.info("[Ingest] URL already indexed: %s (user_file_id=%d)", url, existing_uf.id)
-                    file_content = await self.file_service.storage.download_file(content_file.file_path)
-                    text = file_content.decode("utf-8") if file_content else ""
+                    text = await self.file_content_service.get_text_content(
+                        content_file,
+                        filename=existing_uf.custom_title or (content_file.media_metadata or {}).get("title") or "document",
+                        strict=False,
+                    )
                     filename = existing_uf.custom_title or (content_file.media_metadata or {}).get("title") or "document"
                 else:
                     text = ""
