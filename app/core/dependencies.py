@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
 
 from app.core.security import decode_access_token
 
@@ -54,6 +54,9 @@ from app.graph.nodes.summary_agent import SummaryAgent
 from app.infrastructure.workers.celery_app import celery_app
 from app.infrastructure.workers.task_manager import TaskManager
 from app.services.sync_service import SyncService
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 
 
@@ -279,11 +282,10 @@ def get_user_service(
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=True)),
+    token: str = Depends(oauth2_scheme),
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
     """Текущий пользователь по JWT из заголовка Authorization: Bearer <token>."""
-    token = credentials.credentials
     user_id = decode_access_token(token)
     if user_id is None:
         raise HTTPException(

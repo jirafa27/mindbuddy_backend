@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from langchain_core.runnables import RunnableConfig
 
 from app.core.enums import IntentType
+from app.core.namespace_constants import INBOX_NAMESPACE_NAME
 from app.graph.state import AskState
 from app.graph.sub_state_builder import build_sub_state
 from app.graph.utils.namespace import resolve_namespace_id, resolve_namespace_name, list_namespace_names
@@ -468,18 +469,18 @@ class ActionResolverNode:
                         step.tool, ns_id,
                     )
                 elif db and user_id is not None:
-                    inbox_id = await self._resolve_namespace_id(db, user_id, "Inbox")
+                    inbox_id = await self._resolve_namespace_id(db, user_id, INBOX_NAMESPACE_NAME)
                     if inbox_id:
                         ns_id = inbox_id
-                        ns_hint = "Inbox"
+                        ns_hint = INBOX_NAMESPACE_NAME
                         logger.info("[ActionResolverNode] %s: defaulting to Inbox (id=%d)", step.tool, inbox_id)
 
             if step.tool == IntentType.INDEX_URL and ns_id is None and not ns_hint:
                 if db and user_id is not None:
-                    inbox_id = await self._resolve_namespace_id(db, user_id, "Inbox")
+                    inbox_id = await self._resolve_namespace_id(db, user_id, INBOX_NAMESPACE_NAME)
                     if inbox_id:
                         ns_id = inbox_id
-                        ns_hint = "Inbox"
+                        ns_hint = INBOX_NAMESPACE_NAME
                         logger.info("[ActionResolverNode] %s: defaulting to Inbox (id=%d)", step.tool, inbox_id)
 
             resolved.append({

@@ -75,7 +75,7 @@ class NamespaceTreeItem(BaseModel):
     user_id: int
     name: str
     parent_id: Optional[int]
-    kind: str
+    kind: str = Field(..., description="Тип пространства: vault_root, regular, inbox, trash")
     description: Optional[str]
     created_at: datetime
     files_count: int = 0
@@ -87,7 +87,7 @@ class NamespaceStructureItem(BaseModel):
     id: int = Field(..., description="ID пространства знаний")
     name: str = Field(..., description="Имя пространства (имя папки на диске)")
     parent_id: Optional[int] = Field(None, description="ID родительского пространства")
-    kind: str = Field("regular", description="Тип пространства: regular, inbox, trash")
+    kind: str = Field("regular", description="Тип пространства: vault_root, regular, inbox, trash")
     files: list[FileStructureItem] = Field(default_factory=list, description="Файлы в этом пространстве")
 
     class Config:

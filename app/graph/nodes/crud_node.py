@@ -23,6 +23,7 @@ from sqlalchemy import text
 from app.graph.state import AskState
 from app.core.enums import IntentType
 from app.core.exceptions import NotFoundError, ForbiddenError, ValidationError
+from app.core.namespace_constants import INBOX_NAMESPACE_NAME
 from app.domain.protocols import LLMProvider, FileStorage, TaskPublisher
 from app.services.file_service import FileService
 from app.services.namespace_service import NamespaceService
@@ -448,10 +449,10 @@ class CrudNode:
                 "agent_steps": agent_steps,
             }
         if namespace_id is None and config is not None:
-            inbox_id = await self._resolve_namespace_id(config, user_id, "Inbox")
+            inbox_id = await self._resolve_namespace_id(config, user_id, INBOX_NAMESPACE_NAME)
             if inbox_id is not None:
                 namespace_id = inbox_id
-                namespace_name = "Inbox"
+                namespace_name = INBOX_NAMESPACE_NAME
                 logger.info("[CrudNode] create_file: no namespace, using Inbox (id=%d)", inbox_id)
 
         file_created = await self.file_service.create_file_from_text(

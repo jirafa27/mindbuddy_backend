@@ -21,6 +21,12 @@ from app.domain.protocols import (
 from app.infrastructure.db.models import UserFile
 from app.schemas.file import FileCreated, FileProcessingResult, FileInfo, FileVersionInfo, DeduplicationResult, ProcessUserLinkResult, CommandType
 from app.core.config import settings
+from app.core.namespace_constants import (
+    TRASH_NAMESPACE_KIND,
+    TRASH_NAMESPACE_NAME,
+    VAULT_ROOT_NAMESPACE_KIND,
+    VAULT_ROOT_NAMESPACE_NAME,
+)
 from app.core.exceptions import (
     ValidationError,
     NotFoundError,
@@ -87,24 +93,42 @@ class FileService:
     async def _get_or_create_trash_namespace_id(self, user_id: int) -> int:
         if not self.namespace_repository or not self.db:
             raise ValidationError("Namespace repository is required")
-        trash_name = "Trash"
-        trash_kind = "trash"
-        existing = await self.namespace_repository.get_by_name_and_user(
-            name=trash_name,
+        vault_root = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
+            parent_id=None,
+            name=VAULT_ROOT_NAMESPACE_NAME,
         )
-        if existing and existing.parent_id is None:
-            if existing.kind != trash_kind:
-                existing.kind = trash_kind
+        if vault_root is None:
+            vault_root = await self.namespace_repository.create(
+                name=VAULT_ROOT_NAMESPACE_NAME,
+                user_id=user_id,
+                parent_id=None,
+                kind=VAULT_ROOT_NAMESPACE_KIND,
+                description=None,
+            )
+            await self.db.commit()
+        elif vault_root.kind != VAULT_ROOT_NAMESPACE_KIND:
+            vault_root.kind = VAULT_ROOT_NAMESPACE_KIND
+            vault_root = await self.namespace_repository.update(vault_root)
+            await self.db.commit()
+
+        existing = await self.namespace_repository.get_by_name_and_parent(
+            user_id=user_id,
+            parent_id=vault_root.id,
+            name=TRASH_NAMESPACE_NAME,
+        )
+        if existing:
+            if existing.kind != TRASH_NAMESPACE_KIND:
+                existing.kind = TRASH_NAMESPACE_KIND
                 updated = await self.namespace_repository.update(existing)
                 await self.db.commit()
                 return updated.id
             return existing.id
         namespace = await self.namespace_repository.create(
-            name=trash_name,
+            name=TRASH_NAMESPACE_NAME,
             user_id=user_id,
-            parent_id=None,
-            kind=trash_kind,
+            parent_id=vault_root.id,
+            kind=TRASH_NAMESPACE_KIND,
             description=None,
         )
         await self.db.commit()
@@ -1134,7 +1158,7 @@ class FileService:
         file_content: bytes,
         filename: str,
         *,
-        base_revision: Optional[int] = None,
+        base_hash: Optional[str] = None,
         force_overwrite: bool = False,
         summary_repository: Optional[SummaryRepository] = None,
         task_publisher: Optional[TaskPublisher] = None,
@@ -1156,7 +1180,7 @@ class FileService:
             await self.sync_notifier.assert_can_save(
                 user_file_id=file_id,
                 user_id=user_id,
-                base_hash=base_revision,
+                base_hash=base_hash,
                 force_overwrite=force_overwrite,
             )
 

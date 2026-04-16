@@ -9,6 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from app.core.namespace_constants import (
+    INBOX_NAMESPACE_KIND,
+    REGULAR_NAMESPACE_KIND,
+    TRASH_NAMESPACE_KIND,
+    TRASH_NAMESPACE_NAME,
+    VAULT_ROOT_NAMESPACE_KIND,
+    VAULT_ROOT_NAMESPACE_NAME,
+)
 from app.domain.protocols import (
     FileRepository,
     FileStorage,
@@ -69,12 +77,7 @@ class SyncService:
             storage=storage,
             file_reader_factory=file_reader_factory,
         )
-        self.inbox_namespace_kind = "inbox"
-        self.trash_namespace_name = "Trash"
-        self.trash_namespace_kind = "trash"
-        self.vault_root_namespace_name = "Vault"
-        self.vault_root_namespace_kind = "vault_root"
-        self.regular_namespace_kind = "regular"
+
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
@@ -183,20 +186,19 @@ class SyncService:
         self,
         *,
         user_id: int,
-        vault_name: str,
         folder_parts: list[str],
     ) -> int:
         root = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
             parent_id=None,
-            name=vault_name,
+            name=VAULT_ROOT_NAMESPACE_NAME,
         )
         if root is None:
             root = await self.namespace_repository.create(
-                name=vault_name,
+                name=VAULT_ROOT_NAMESPACE_NAME,
                 user_id=user_id,
                 parent_id=None,
-                kind=self.vault_root_namespace_kind,
+                kind=VAULT_ROOT_NAMESPACE_KIND,
                 description=None,
             )
 
@@ -212,29 +214,47 @@ class SyncService:
                     name=part,
                     user_id=user_id,
                     parent_id=current_id,
-                    kind=self.regular_namespace_kind,
+                    kind=REGULAR_NAMESPACE_KIND,
                     description=None,
                 )
             current_id = node.id
         return current_id
 
     async def _get_or_create_trash_namespace_id(self, *, user_id: int) -> int:
-        existing = await self.namespace_repository.get_by_name_and_user(
-            name=self.trash_namespace_name,
+        vault_root = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
+            parent_id=None,
+            name=VAULT_ROOT_NAMESPACE_NAME,
         )
-        if existing and existing.parent_id is None:
-            if existing.kind != self.trash_namespace_kind:
-                existing.kind = self.trash_namespace_kind
+        if vault_root is None:
+            vault_root = await self.namespace_repository.create(
+                name=VAULT_ROOT_NAMESPACE_NAME,
+                user_id=user_id,
+                parent_id=None,
+                kind=VAULT_ROOT_NAMESPACE_KIND,
+                description=None,
+            )
+        elif vault_root.kind != VAULT_ROOT_NAMESPACE_KIND:
+            vault_root.kind = VAULT_ROOT_NAMESPACE_KIND
+            vault_root = await self.namespace_repository.update(vault_root)
+
+        existing = await self.namespace_repository.get_by_name_and_parent(
+            user_id=user_id,
+            parent_id=vault_root.id,
+            name=TRASH_NAMESPACE_NAME,
+        )
+        if existing:
+            if existing.kind != TRASH_NAMESPACE_KIND:
+                existing.kind = TRASH_NAMESPACE_KIND
                 updated = await self.namespace_repository.update(existing)
                 return updated.id
             return existing.id
 
         namespace = await self.namespace_repository.create(
-            name=self.trash_namespace_name,
+            name=TRASH_NAMESPACE_NAME,
             user_id=user_id,
-            parent_id=None,
-            kind=self.trash_namespace_kind,
+            parent_id=vault_root.id,
+            kind=TRASH_NAMESPACE_KIND,
             description=None,
         )
         return namespace.id
@@ -354,10 +374,10 @@ class SyncService:
     async def _build_namespace_delete_payload(self, namespace: NamespaceEntity) -> dict:
         parts: list[str] = []
         current: Optional[NamespaceEntity] = namespace
-        vault_name = self.vault_root_namespace_name
+        vault_name = VAULT_ROOT_NAMESPACE_NAME
 
         while current is not None:
-            if current.kind == self.vault_root_namespace_kind:
+            if current.kind == VAULT_ROOT_NAMESPACE_KIND:
                 vault_name = current.name
                 break
 
@@ -572,13 +592,20 @@ class SyncService:
         Returns:
             SyncAckResponse: Ответ на подтверждение выполнения или ошибки команды синхронизации
         """
-        command = await self.sync_repository.get_command(command_id, user_id)
+        command = await self.sync_repository.ack_command(
+            command_id=command_id,
+            user_id=user_id,
+            status=status.value,
+        )
         if command is None:
             raise NotFoundError(f"Команда с id {command_id} не найдена")
-        command.status = status
-        command.acked_at = datetime.utcnow()
-        await self.sync_repository.commit()
-        return SyncAckResponse(acked_at=command.acked_at, command_id=command_id, command_type=command.command_type, status=command.status)
+        await self.db.commit()
+        return SyncAckResponse(
+            acked_at=command.acked_at,
+            command_id=command_id,
+            command_type=command.command_type,
+            status=command.status,
+        )
         
 
     async def apply_desktop_delete(
@@ -618,7 +645,11 @@ class SyncService:
             raise NotFoundError(f"Пространство с id {namespace_id} не найдено")
         if namespace.user_id != user_id:
             raise ForbiddenError("У вас нет доступа к этому пространству")
-        if namespace.kind == self.inbox_namespace_kind or namespace.kind == self.trash_namespace_kind:
+        if (
+            namespace.kind == INBOX_NAMESPACE_KIND
+            or namespace.kind == TRASH_NAMESPACE_KIND
+            or namespace.kind == VAULT_ROOT_NAMESPACE_KIND
+        ):
             raise ValidationError(f"Пространство {namespace.kind} нельзя удалить через sync")
 
         descendant_ids = await self.namespace_repository.get_descendant_ids(
@@ -665,7 +696,6 @@ class SyncService:
         relative_path: Optional[str] = None,
     ) -> NamespaceStructureItem:
         if relative_path:
-            effective_vault_name = " ".join((vault_name or "").split()).strip() or self.vault_root_namespace_name
             normalized_relative_path = relative_path.replace("\\", "/").strip("/")
             raw_parts = normalized_relative_path.split("/")
             normalized_parts = [" ".join(part.split()).strip() for part in raw_parts if part.strip()]
@@ -683,20 +713,23 @@ class SyncService:
             if len(normalized_parts) == 1:
                 parent_id = await self._resolve_namespace_from_path(
                     user_id=user_id,
-                    vault_name=effective_vault_name,
                     folder_parts=[],
                 )
             else:
                 parent_id = await self._resolve_namespace_from_path(
                     user_id=user_id,
-                    vault_name=effective_vault_name,
                     folder_parts=normalized_parts[:-1],
                 )
+        elif parent_id is None:
+            parent_id = await self._resolve_namespace_from_path(
+                user_id=user_id,
+                folder_parts=[],
+            )
 
         normalized_name = " ".join((name or "").split()).strip()
         if not normalized_name:
             raise ValidationError("Нужно передать name или relative_path")
-        if parent_id is None and normalized_name == self.trash_namespace_name:
+        if normalized_name == TRASH_NAMESPACE_NAME:
             raise ValidationError("Имя 'Trash' зарезервировано для системного пространства")
 
         if parent_id is not None:
@@ -705,7 +738,7 @@ class SyncService:
                 raise NotFoundError(f"Пространство с id {parent_id} не найдено")
             if parent.user_id != user_id:
                 raise ForbiddenError("У вас нет доступа к родительскому пространству")
-            if parent.kind == self.trash_namespace_kind:
+            if parent.kind == TRASH_NAMESPACE_KIND:
                 raise ValidationError("В пространстве Trash нельзя создавать папки через sync")
 
         existing = await self.namespace_repository.get_by_name_and_parent(
@@ -718,7 +751,7 @@ class SyncService:
                 id=existing.id,
                 name=existing.name,
                 parent_id=existing.parent_id,
-                kind="regular" if existing.kind == self.vault_root_namespace_kind else existing.kind,
+                kind=existing.kind,
                 files=[],
             )
 
@@ -726,7 +759,7 @@ class SyncService:
             name=normalized_name,
             user_id=user_id,
             parent_id=parent_id,
-            kind=self.regular_namespace_kind,
+            kind=REGULAR_NAMESPACE_KIND,
             description=description,
         )
         await self.db.commit()
@@ -938,7 +971,6 @@ class SyncService:
             await self.db.commit()
             return SyncUploadResponse(file=file_info, created=False)
 
-        vault_name = upload_request.vault_name or self.vault_root_namespace_name
         vault_path = upload_request.vault_relative_path.replace("\\", "/")
         parts = vault_path.split("/")
         # убираем имя файла, оставляем только директории
@@ -946,7 +978,6 @@ class SyncService:
 
         namespace_id = await self._resolve_namespace_from_path(
             user_id=user_id,
-            vault_name=vault_name,
             folder_parts=folder_parts,
         )
 

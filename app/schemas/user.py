@@ -37,3 +37,9 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
 
+
+class AccessTokenResponse(BaseModel):
+    """Краткий OAuth2-ответ для Swagger."""
+    access_token: str
+    token_type: str = "bearer"
+

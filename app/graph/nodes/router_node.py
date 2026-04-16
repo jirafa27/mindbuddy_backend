@@ -4,6 +4,7 @@ from typing import Optional, List, Dict
 
 from langchain_core.runnables import RunnableConfig
 
+from app.core.namespace_constants import INBOX_NAMESPACE_NAME
 from app.graph.state import AskState
 from app.core.enums import IntentType
 from app.utils.url import extract_first_http_url, is_http_url_only
@@ -75,10 +76,10 @@ class RouterNode:
         db = configurable.get("async_db")
         if not db or user_id is None:
             return None, namespace_name_hint
-        inbox_id = await self._resolve_namespace_id(db, user_id, "Inbox")
+        inbox_id = await self._resolve_namespace_id(db, user_id, INBOX_NAMESPACE_NAME)
         if inbox_id is not None:
             logger.info("[Router] Chat file upload: default → Inbox (id=%d)", inbox_id)
-            return inbox_id, "Inbox"
+            return inbox_id, INBOX_NAMESPACE_NAME
         logger.warning("[Router] Chat file upload: Inbox not found for user_id=%s", user_id)
         return None, namespace_name_hint
 

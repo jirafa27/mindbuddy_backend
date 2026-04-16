@@ -5,14 +5,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.protocols import UserRepository, NamespaceRepository
 from app.core.exceptions import ValidationError, NotFoundError, UnauthorizedError
+from app.core.namespace_constants import (
+    INBOX_NAMESPACE_KIND,
+    INBOX_NAMESPACE_NAME,
+    TRASH_NAMESPACE_KIND,
+    TRASH_NAMESPACE_NAME,
+    VAULT_ROOT_NAMESPACE_KIND,
+    VAULT_ROOT_NAMESPACE_NAME,
+)
 from app.schemas.user import UserResponse
 from app.core.security import hash_password, verify_password
-
-
-INBOX_NAMESPACE_NAME = "Inbox"
-INBOX_NAMESPACE_KIND = "inbox"
-TRASH_NAMESPACE_NAME = "Trash"
-TRASH_NAMESPACE_KIND = "trash"
 
 
 def _entity_to_response(user) -> UserResponse:
@@ -60,8 +62,9 @@ class UserService:
         )
         await self.db.commit()
         if self.namespace_repository:
-            await self._ensure_inbox_for_user(user.id)
-            await self._ensure_trash_for_user(user.id)
+            await self._get_or_create_vault_root_for_user(user.id)
+            await self._get_or_create_inbox_for_user(user.id)
+            await self._get_or_create_trash_for_user(user.id)
         return _entity_to_response(user)
 
     async def get_user(
@@ -97,30 +100,64 @@ class UserService:
             raise UnauthorizedError("Недействительный токен Desktop Watcher")
         return _entity_to_response(user)
 
-    async def _ensure_inbox_for_user(self, user_id: int) -> None:
-        """Создаёт пространство Inbox для пользователя, если его ещё нет."""
-        existing = await self.namespace_repository.get_by_name_and_user(
-            name=INBOX_NAMESPACE_NAME,
+    async def _get_or_create_vault_root_for_user(self, user_id: int) -> int:
+        """Получает или создаёт пространство Vault для пользователя."""
+        existing = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
+            parent_id=None,
+            name=VAULT_ROOT_NAMESPACE_NAME,
         )
-        if existing and existing.kind == INBOX_NAMESPACE_KIND and existing.parent_id is None:
+        if existing:
+            if existing.kind != VAULT_ROOT_NAMESPACE_KIND:
+                existing.kind = VAULT_ROOT_NAMESPACE_KIND
+                updated = await self.namespace_repository.update(existing)
+                await self.db.commit()
+                return updated.id
+            return existing.id
+
+        namespace = await self.namespace_repository.create(
+            name=VAULT_ROOT_NAMESPACE_NAME,
+            user_id=user_id,
+            parent_id=None,
+            kind=VAULT_ROOT_NAMESPACE_KIND,
+            description=None,
+        )
+        await self.db.commit()
+        return namespace.id
+
+    async def _get_or_create_inbox_for_user(self, user_id: int) -> None:
+        """Создаёт пространство Inbox для пользователя, если его ещё нет."""
+        vault_root_id = await self._get_or_create_vault_root_for_user(user_id)
+        existing = await self.namespace_repository.get_by_name_and_parent(
+            user_id=user_id,
+            parent_id=vault_root_id,
+            name=INBOX_NAMESPACE_NAME,
+        )
+        if existing:
+            if existing.kind == INBOX_NAMESPACE_KIND:
+                return
+            existing.kind = INBOX_NAMESPACE_KIND
+            await self.namespace_repository.update(existing)
+            await self.db.commit()
             return
         await self.namespace_repository.create(
             name=INBOX_NAMESPACE_NAME,
             user_id=user_id,
-            parent_id=None,
+            parent_id=vault_root_id,
             kind=INBOX_NAMESPACE_KIND,
             description=None,
         )
         await self.db.commit()
 
-    async def _ensure_trash_for_user(self, user_id: int) -> None:
+    async def _get_or_create_trash_for_user(self, user_id: int) -> None:
         """Создаёт пространство Trash для пользователя, если его ещё нет."""
-        existing = await self.namespace_repository.get_by_name_and_user(
-            name=TRASH_NAMESPACE_NAME,
+        vault_root_id = await self._get_or_create_vault_root_for_user(user_id)
+        existing = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
+            parent_id=vault_root_id,
+            name=TRASH_NAMESPACE_NAME,
         )
-        if existing and existing.parent_id is None:
+        if existing:
             if existing.kind == TRASH_NAMESPACE_KIND:
                 return
             existing.kind = TRASH_NAMESPACE_KIND
@@ -130,7 +167,7 @@ class UserService:
         await self.namespace_repository.create(
             name=TRASH_NAMESPACE_NAME,
             user_id=user_id,
-            parent_id=None,
+            parent_id=vault_root_id,
             kind=TRASH_NAMESPACE_KIND,
             description=None,
         )

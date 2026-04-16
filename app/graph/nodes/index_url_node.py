@@ -4,6 +4,7 @@ import logging
 from langchain_core.runnables import RunnableConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.namespace_constants import INBOX_NAMESPACE_NAME
 from app.graph.state import AskState
 from app.domain.protocols import TaskPublisher
 from app.services.content_extractor import ContentExtractorService
@@ -45,7 +46,7 @@ class IndexUrlNode:
         detected_url = state.get("detected_url")
         user_id = state.get("user_id")
         namespace_id = state.get("namespace_id")
-        ns_label = state.get("namespace_name_hint") or (str(namespace_id) if namespace_id else "Inbox")
+        ns_label = state.get("namespace_name_hint") or (str(namespace_id) if namespace_id else INBOX_NAMESPACE_NAME)
         
         configurable = (config or {}).get("configurable") or {}
         db: AsyncSession | None = configurable.get("async_db")

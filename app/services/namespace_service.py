@@ -5,6 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.protocols import NamespaceRepository, UserFileRepository, FileSyncNotifier
 from app.core.exceptions import NotFoundError, ValidationError, ForbiddenError
+from app.core.namespace_constants import (
+    INBOX_NAMESPACE_KIND,
+    INBOX_NAMESPACE_NAME,
+    REGULAR_NAMESPACE_KIND,
+    TRASH_NAMESPACE_KIND,
+    TRASH_NAMESPACE_NAME,
+    VAULT_ROOT_NAMESPACE_KIND,
+    VAULT_ROOT_NAMESPACE_NAME,
+)
 from app.domain.entities.namespace import NamespaceEntity, NamespaceFileItem
 from app.schemas.file import FileStructureItem
 from app.schemas.namespace import NamespaceStructureItem
@@ -24,12 +33,6 @@ class NamespaceService:
             namespace_repository: Репозиторий для работы с namespace
             db: Сессия БД
         """
-        self.inbox_namespace_name = "Inbox"
-        self.inbox_namespace_kind = "inbox"
-        self.trash_namespace_name = "Trash"
-        self.trash_namespace_kind = "trash"
-        self.vault_root_namespace_kind = "vault_root"
-        self.regular_namespace_kind = "regular"
         self.namespace_repository = namespace_repository
         self.user_file_repository = user_file_repository
         self.sync_notifier = sync_notifier
@@ -53,9 +56,13 @@ class NamespaceService:
             NamespaceEntity.
         """
 
-        if kind == self.trash_namespace_kind:
+        if kind == TRASH_NAMESPACE_KIND:
             raise ValidationError("Системное пространство Trash нельзя создать вручную")
-        if parent_id is None and name == self.trash_namespace_name:
+        if kind == VAULT_ROOT_NAMESPACE_KIND:
+            raise ValidationError("Системное пространство Vault нельзя создать вручную")
+        if kind == REGULAR_NAMESPACE_KIND and parent_id is None:
+            parent_id = await self.get_or_create_vault_root_namespace(user_id=user_id)
+        if name == TRASH_NAMESPACE_NAME:
             raise ValidationError("Имя 'Trash' зарезервировано для системного пространства")
         existing = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
@@ -84,23 +91,25 @@ class NamespaceService:
         Returns:
             ID пространства «Trash».
         """
-        existing = await self.namespace_repository.get_by_name_and_user(
-            name=self.trash_namespace_name,
+        vault_root_id = await self.get_or_create_vault_root_namespace(user_id=user_id)
+        existing = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
+            parent_id=vault_root_id,
+            name=TRASH_NAMESPACE_NAME,
         )
-        if existing and existing.parent_id is None:
-            if existing.kind != self.trash_namespace_kind:
-                existing.kind = self.trash_namespace_kind
+        if existing:
+            if existing.kind != TRASH_NAMESPACE_KIND:
+                existing.kind = TRASH_NAMESPACE_KIND
                 updated = await self.namespace_repository.update(existing)
                 await self.db.commit()
                 return updated.id
             return existing.id
 
         namespace = await self.namespace_repository.create(
-            name=self.trash_namespace_name,
+            name=TRASH_NAMESPACE_NAME,
             user_id=user_id,
-            parent_id=None,
-            kind=self.trash_namespace_kind,
+            parent_id=vault_root_id,
+            kind=TRASH_NAMESPACE_KIND,
             description=None,
         )
         await self.db.commit()
@@ -117,41 +126,49 @@ class NamespaceService:
         Returns:
             ID пространства «Inbox».
         """
-        existing = await self.namespace_repository.get_by_name_and_user(
-            name=self.inbox_namespace_name,
+        vault_root_id = await self.get_or_create_vault_root_namespace(user_id=user_id)
+        existing = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
+            parent_id=vault_root_id,
+            name=INBOX_NAMESPACE_NAME,
         )
-        if existing and existing.kind == self.inbox_namespace_kind and existing.parent_id is None:
-            return existing.id
+        if existing:
+            if existing.kind == INBOX_NAMESPACE_KIND:
+                return existing.id
+            existing.kind = INBOX_NAMESPACE_KIND
+            updated = await self.namespace_repository.update(existing)
+            await self.db.commit()
+            return updated.id
+
         namespace = await self.namespace_repository.create(
-            name=self.inbox_namespace_name,
+            name=INBOX_NAMESPACE_NAME,
             user_id=user_id,
-            parent_id=None,
-            kind=self.inbox_namespace_kind,
+            parent_id=vault_root_id,
+            kind=INBOX_NAMESPACE_KIND,
             description=None,
         )
         await self.db.commit()
         return namespace.id
 
-    async def get_or_create_vault_root_namespace(self, user_id: int, vault_name: str) -> int:
+    async def get_or_create_vault_root_namespace(self, user_id: int) -> int:
         existing = await self.namespace_repository.get_by_name_and_parent(
             user_id=user_id,
             parent_id=None,
-            name=vault_name,
+            name=VAULT_ROOT_NAMESPACE_NAME,
         )
         if existing:
-            if existing.kind != self.vault_root_namespace_kind:
-                existing.kind = self.vault_root_namespace_kind
+            if existing.kind != VAULT_ROOT_NAMESPACE_KIND:
+                existing.kind = VAULT_ROOT_NAMESPACE_KIND
                 updated = await self.namespace_repository.update(existing)
                 await self.db.commit()
                 return updated.id
             return existing.id
 
         namespace = await self.namespace_repository.create(
-            name=vault_name,
+            name=VAULT_ROOT_NAMESPACE_NAME,
             user_id=user_id,
             parent_id=None,
-            kind=self.vault_root_namespace_kind,
+            kind=VAULT_ROOT_NAMESPACE_KIND,
             description=None,
         )
         await self.db.commit()
@@ -245,7 +262,9 @@ class NamespaceService:
             raise NotFoundError(f"Namespace с ID {namespace_id} не найден")
         if namespace.user_id != user_id:
             raise ForbiddenError("Нет доступа к данному namespace")
-        if namespace.kind == self.trash_namespace_kind:
+        if namespace.kind == VAULT_ROOT_NAMESPACE_KIND:
+            raise ValidationError("Системное пространство Vault нельзя изменять")
+        if namespace.kind == TRASH_NAMESPACE_KIND:
             raise ValidationError("Системное пространство Trash нельзя изменять")
         if name and name != namespace.name:
             existing = await self.namespace_repository.get_by_name_and_parent(
@@ -275,10 +294,12 @@ class NamespaceService:
             raise NotFoundError(f"Namespace с ID {namespace_id} не найден")
         if namespace.user_id != user_id:
             raise ForbiddenError("Нет доступа к данному namespace")
-        if namespace.kind == self.inbox_namespace_kind:
+        if namespace.kind == INBOX_NAMESPACE_KIND:
             raise ValidationError("Пространство «Inbox» нельзя удалить")
-        if namespace.kind == self.trash_namespace_kind:
+        if namespace.kind == TRASH_NAMESPACE_KIND:
             raise ValidationError("Пространство «Trash» нельзя удалить")
+        if namespace.kind == VAULT_ROOT_NAMESPACE_KIND:
+            raise ValidationError("Пространство «Vault» нельзя удалить")
 
         if self.user_file_repository:
             trash_namespace_id = await self.get_or_create_trash(user_id)
@@ -340,7 +361,7 @@ class NamespaceService:
                     id=ns.id,
                     name=ns.name,
                     parent_id=ns.parent_id,
-                    kind="regular" if ns.kind == self.vault_root_namespace_kind else ns.kind,
+                    kind=ns.kind,
                     files=files,
                 )
             )

@@ -4,6 +4,7 @@ from typing import Any, List, Optional
 
 from langchain_core.runnables import RunnableConfig
 
+from app.core.namespace_constants import INBOX_NAMESPACE_NAME
 from app.graph.state import AskState
 from app.domain.protocols import BlobStorage
 from app.services.summary_service import SummaryService
@@ -145,10 +146,10 @@ class SummaryNode:
         if storage_namespace_id is None and config:
             db = (config.get("configurable") or {}).get("async_db")
             if db and user_id:
-                inbox_id = await resolve_namespace_id(db, user_id, "Inbox")
+                inbox_id = await resolve_namespace_id(db, user_id, INBOX_NAMESPACE_NAME)
                 if inbox_id:
                     storage_namespace_id = inbox_id
-                    storage_namespace_name = "Inbox"
+                    storage_namespace_name = INBOX_NAMESPACE_NAME
                     logger.info("[SummaryNode] URL content: defaulting storage to Inbox (id=%d)", inbox_id)
         try:
             content_or_cached = await summary_service.get_content_for_summarization_url(

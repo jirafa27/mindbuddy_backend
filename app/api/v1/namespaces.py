@@ -14,6 +14,11 @@ from app.schemas import (
     ResponseMessage,
     ListResponseData,
 )
+from app.core.namespace_constants import (
+    INBOX_NAMESPACE_KIND,
+    TRASH_NAMESPACE_KIND,
+    VAULT_ROOT_NAMESPACE_KIND,
+)
 from app.domain.protocols import FileStorage
 from app.services.namespace_service import NamespaceService
 from app.core.dependencies import get_namespace_service, get_storage_service, get_current_user
@@ -48,7 +53,7 @@ def _build_namespace_tree(items: list[NamespaceListItem]) -> list[NamespaceTreeI
             roots.append(node)
     roots.sort(
         key=lambda node: (
-            0 if node.kind == "inbox" else 2 if node.kind == "trash" else 1,
+            0 if node.kind == VAULT_ROOT_NAMESPACE_KIND else 1 if node.kind == INBOX_NAMESPACE_KIND else 3 if node.kind == TRASH_NAMESPACE_KIND else 2,
             node.name.lower(),
         )
     )
