@@ -246,6 +246,7 @@ class NamespaceService:
         user_id: int,
         name: Optional[str],
         description: Optional[str],
+        notify_watcher: bool = True,
     ) -> NamespaceEntity:
         """Обновляет namespace.
         Args:
@@ -266,6 +267,8 @@ class NamespaceService:
             raise ValidationError("Системное пространство Vault нельзя изменять")
         if namespace.kind == TRASH_NAMESPACE_KIND:
             raise ValidationError("Системное пространство Trash нельзя изменять")
+        old_name = namespace.name
+        name_changed = False
         if name and name != namespace.name:
             existing = await self.namespace_repository.get_by_name_and_parent(
                 user_id=user_id,
@@ -277,9 +280,80 @@ class NamespaceService:
                     f"Namespace с именем '{name}' уже существует на этом уровне"
                 )
             namespace.name = name
+            name_changed = True
         if description is not None:
             namespace.description = description
         entity = await self.namespace_repository.update(namespace)
+        if self.sync_notifier and notify_watcher and name_changed and entity.name != old_name:
+            await self.sync_notifier.add_rename_namespace_command_to_queue(
+                namespace_id=entity.id,
+                user_id=user_id,
+                new_name=entity.name,
+            )
+        await self.db.commit()
+        return entity
+
+    async def move_namespace(
+        self,
+        *,
+        namespace_id: int,
+        user_id: int,
+        target_parent_id: int,
+        notify_watcher: bool = True,
+    ) -> NamespaceEntity:
+        """Перемещает namespace под нового родителя."""
+        namespace = await self.namespace_repository.get_by_id(namespace_id)
+        if not namespace:
+            raise NotFoundError(f"Namespace с ID {namespace_id} не найден")
+        if namespace.user_id != user_id:
+            raise ForbiddenError("Нет доступа к данному namespace")
+        if namespace.kind == VAULT_ROOT_NAMESPACE_KIND:
+            raise ValidationError("Системное пространство Vault нельзя перемещать")
+        if namespace.kind == TRASH_NAMESPACE_KIND:
+            raise ValidationError("Системное пространство Trash нельзя перемещать")
+        if namespace.kind == INBOX_NAMESPACE_KIND:
+            raise ValidationError("Системное пространство Inbox нельзя перемещать")
+        if namespace.id == target_parent_id:
+            raise ValidationError("Нельзя переместить пространство в само себя")
+
+        target_parent = await self.namespace_repository.get_by_id(target_parent_id)
+        if not target_parent:
+            raise NotFoundError(f"Родительское пространство с ID {target_parent_id} не найдено")
+        if target_parent.user_id != user_id:
+            raise ForbiddenError("Нет доступа к целевому пространству")
+        if target_parent.kind == TRASH_NAMESPACE_KIND:
+            raise ValidationError("Нельзя переместить пространство внутрь Trash")
+        if target_parent.kind == INBOX_NAMESPACE_KIND:
+            raise ValidationError("Нельзя переместить пространство внутрь Inbox")
+
+        descendant_ids = await self.namespace_repository.get_descendant_ids(
+            user_id=user_id,
+            namespace_id=namespace_id,
+        )
+        if target_parent_id in descendant_ids:
+            raise ValidationError("Нельзя переместить пространство внутрь собственного потомка")
+
+        existing = await self.namespace_repository.get_by_name_and_parent(
+            user_id=user_id,
+            parent_id=target_parent_id,
+            name=namespace.name,
+        )
+        if existing and existing.id != namespace.id:
+            raise ValidationError(
+                f"Namespace с именем '{namespace.name}' уже существует на этом уровне"
+            )
+
+        if namespace.parent_id == target_parent_id:
+            return namespace
+
+        namespace.parent_id = target_parent_id
+        entity = await self.namespace_repository.update(namespace)
+        if self.sync_notifier and notify_watcher:
+            await self.sync_notifier.add_move_namespace_command_to_queue(
+                namespace_id=entity.id,
+                user_id=user_id,
+                target_parent_id=target_parent_id,
+            )
         await self.db.commit()
         return entity
 

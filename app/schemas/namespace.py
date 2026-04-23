@@ -40,6 +40,16 @@ class NamespaceUpdate(BaseModel):
     description: Optional[str] = Field(None, max_length=1000)
 
 
+class NamespaceMoveRequest(BaseModel):
+    """Схема перемещения namespace."""
+    target_parent_id: int = Field(..., description="ID нового родительского пространства")
+
+
+class NamespaceRenameRequest(BaseModel):
+    """Схема переименования namespace."""
+    new_name: str = Field(..., min_length=1, max_length=255, description="Новое имя пространства")
+
+
 class NamespaceListItem(BaseModel):
     """Схема namespace для списка (без файлов, с количеством)"""
     id: int

@@ -147,11 +147,19 @@ class SyncService:
             return None
         return mapping.get(str(content_type).split(";", 1)[0].strip().lower())
 
-    def _ensure_filename_extension(
+    def _add_extension_to_filename_if_needed(
         self,
         filename: Optional[str],
         content_file: Optional[File],
     ) -> Optional[str]:
+        """
+        Обеспечивает расширение файла, если оно не указано.
+        Args:
+            filename: Имя файла
+            content_file: Файл
+        Returns:
+            Имя файла с расширением
+        """
         if not filename:
             return filename
         if "." in filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]:
@@ -294,7 +302,6 @@ class SyncService:
             app_updated_at=user_file.app_updated_at,
             last_update_source=user_file.last_update_source,
             content_hash=content_file.content_hash,
-            vault_relative_path=user_file.vault_relative_path,
             is_conflict_copy=user_file.is_conflict_copy,
         )
 
@@ -307,7 +314,6 @@ class SyncService:
             app_updated_at=user_file.app_updated_at,
             last_update_source=user_file.last_update_source,
             content_hash=content_file.content_hash,
-            vault_relative_path=user_file.vault_relative_path,
         )
 
 
@@ -325,38 +331,24 @@ class SyncService:
         return self._build_version_info(user_file, content_file)
 
     async def _build_command_payload(self, user_file: UserFileEntity, content_file: FileEntity) -> dict:
-        resolved_filename = self._ensure_filename_extension(
+        resolved_filename = self._add_extension_to_filename_if_needed(
             user_file.custom_title or ((content_file.media_metadata or {}).get("title") if content_file else None),
             content_file,
         )
         payload = {
             "user_file_id": user_file.id,
-            "vault_relative_path": user_file.vault_relative_path,
             "namespace_id": user_file.namespace_id,
             "filename": resolved_filename,
             "updated_at": (user_file.updated_at or datetime.utcnow()).isoformat(),
             "last_update_source": user_file.last_update_source,
             "content_hash": content_file.content_hash,
         }
-        payload["content"] = await self.file_content_service.get_text_content(
-            content_file,
-            strict=False,
-        )
-        if content_file.file_path:
-            try:
-                binary = await self.storage.download_file(content_file.file_path)
-                payload["content_base64"] = base64.b64encode(binary).decode("ascii")
-                payload["content_encoding"] = "base64"
-            except Exception:
-                logger.warning("[SyncService] Failed to add binary payload for user_file=%s", user_file.id)
         return payload
-
 
     def _build_user_file_touch_updates(
         self,
         *,
         source: str,
-        vault_relative_path: Optional[str] = None,
     ) -> dict:
         now = datetime.utcnow()
         updates = {
@@ -367,8 +359,6 @@ class SyncService:
             updates["app_updated_at"] = now
         elif source == "desktop":
             updates["desktop_updated_at"] = now
-        if vault_relative_path is not None:
-            updates["vault_relative_path"] = vault_relative_path
         return updates
 
     async def _build_namespace_delete_payload(self, namespace: NamespaceEntity) -> dict:
@@ -388,7 +378,6 @@ class SyncService:
 
         return {
             "namespace_id": namespace.id,
-            "target_type": "namespace",
             "vault_name": vault_name,
             "relative_path": "/".join(reversed(parts)),
         }
@@ -398,8 +387,7 @@ class SyncService:
         *,
         user_file_id: int,
         user_id: int,
-        command_type: CommandType = CommandType.UPSERT.value,
-        vault_relative_path: Optional[str] = None,
+        command_type: CommandType = CommandType.UPSERT_FILE,
     ) -> Optional[SyncCommandEntity]:
         """
         Добавляет команду в список команд синхронизации ожидающих выполнения обновления файла
@@ -407,7 +395,6 @@ class SyncService:
             user_file_id: ID файла
             user_id: ID пользователя
             command_type: Тип команды
-            vault_relative_path: Путь к файлу в хранилище
         Returns:
             Optional[SyncCommandEntity]: Команда синхронизации или None, если файл не найден или пользователь не имеет доступа к файлу
         """
@@ -424,7 +411,6 @@ class SyncService:
             user_file.id,
             **self._build_user_file_touch_updates(
                 source="app",
-                vault_relative_path=vault_relative_path,
             ),
         )
         if not user_file:
@@ -470,12 +456,12 @@ class SyncService:
         if existing_in_trash is not None and existing_in_trash.id != user_file.id:
             payload = {
                 "user_file_id": user_file.id,
-                "namespace_id": trash_namespace_id,
+                "target_namespace_id": trash_namespace_id,
             }
             command = await self.sync_repository.create_command(
                 user_id=user_id,
                 user_file_id=user_file.id,
-                command_type=CommandType.TRASH.value,
+                command_type=CommandType.TRASH_FILE.value,
                 payload_json=payload,
                 status=CommandStatus.PENDING.value,
             )
@@ -487,12 +473,12 @@ class SyncService:
             raise NotFoundError(f"Файл с id {user_file_id} не найден")
         payload = {
             "user_file_id": moved_user_file.id,
-            "namespace_id": trash_namespace_id,
+            "target_namespace_id": trash_namespace_id,
         }
         command = await self.sync_repository.create_command(
             user_id=user_id,
             user_file_id=moved_user_file.id,
-            command_type=CommandType.TRASH.value,
+            command_type=CommandType.TRASH_FILE.value,
             payload_json=payload,
             status=CommandStatus.PENDING.value,
         )
@@ -530,11 +516,120 @@ class SyncService:
         )
         if not user_file:
             raise NotFoundError(f"Файл с id {user_file_id} не найден")
-        payload = await self._build_command_payload(user_file, content_file)
+        payload = {
+            "user_file_id": user_file.id,
+            "new_filename": self._add_extension_to_filename_if_needed(new_title, content_file) or new_title,
+        }
         command = await self.sync_repository.create_command(
             user_id=user_id,
             user_file_id=user_file.id,
-            command_type=CommandType.RENAME.value,
+            command_type=CommandType.RENAME_FILE.value,
+            payload_json=payload,
+            status=CommandStatus.PENDING.value,
+        )
+        return command
+
+    async def add_move_command_to_queue(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+    ) -> Optional[SyncCommandEntity]:
+        user_file = await self.user_file_repository.get_by_id(user_file_id)
+        if not user_file:
+            raise NotFoundError(f"Файл с id {user_file_id} не найден")
+        if user_file.user_id != user_id:
+            raise ForbiddenError("У вас нет доступа к этому файлу")
+
+        content_file = await self.file_repository.get_by_id(user_file.file_id)
+        if not content_file:
+            raise NotFoundError(f"Файл с id {user_file.file_id} не найден")
+
+        payload = {
+            "user_file_id": user_file.id,
+            "target_namespace_id": user_file.namespace_id,
+        }
+
+        command = await self.sync_repository.create_command(
+            user_id=user_id,
+            user_file_id=user_file.id,
+            command_type=CommandType.MOVE_FILE.value,
+            payload_json=payload,
+            status=CommandStatus.PENDING.value,
+        )
+        return command
+
+    async def add_delete_file_command_to_queue(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+    ) -> Optional[SyncCommandEntity]:
+        user_file = await self.user_file_repository.get_by_id(user_file_id)
+        if not user_file:
+            raise NotFoundError(f"Файл с id {user_file_id} не найден")
+        if user_file.user_id != user_id:
+            raise ForbiddenError("У вас нет доступа к этому файлу")
+
+        payload = {
+            "user_file_id": user_file.id,
+        }
+        command = await self.sync_repository.create_command(
+            user_id=user_id,
+            user_file_id=user_file.id,
+            command_type=CommandType.DELETE_FILE.value,
+            payload_json=payload,
+            status=CommandStatus.PENDING.value,
+        )
+        return command
+
+    async def add_rename_namespace_command_to_queue(
+        self,
+        *,
+        namespace_id: int,
+        user_id: int,
+        new_name: str,
+    ) -> Optional[SyncCommandEntity]:
+        namespace = await self.namespace_repository.get_by_id(namespace_id)
+        if not namespace:
+            raise NotFoundError(f"Пространство с id {namespace_id} не найдено")
+        if namespace.user_id != user_id:
+            raise ForbiddenError("У вас нет доступа к этому пространству")
+
+        payload = {
+            "namespace_id": namespace.id,
+            "new_name": new_name,
+        }
+        command = await self.sync_repository.create_command(
+            user_id=user_id,
+            user_file_id=None,
+            command_type=CommandType.RENAME_NAMESPACE.value,
+            payload_json=payload,
+            status=CommandStatus.PENDING.value,
+        )
+        return command
+
+    async def add_move_namespace_command_to_queue(
+        self,
+        *,
+        namespace_id: int,
+        user_id: int,
+        target_parent_id: int,
+    ) -> Optional[SyncCommandEntity]:
+        namespace = await self.namespace_repository.get_by_id(namespace_id)
+        if not namespace:
+            raise NotFoundError(f"Пространство с id {namespace_id} не найдено")
+        if namespace.user_id != user_id:
+            raise ForbiddenError("У вас нет доступа к этому пространству")
+
+        payload = {
+            "namespace_id": namespace.id,
+            "target_parent_id": target_parent_id,
+        }
+        command = await self.sync_repository.create_command(
+            user_id=user_id,
+            user_file_id=None,
+            command_type=CommandType.MOVE_NAMESPACE.value,
             payload_json=payload,
             status=CommandStatus.PENDING.value,
         )
@@ -556,7 +651,7 @@ class SyncService:
         command = await self.sync_repository.create_command(
             user_id=user_id,
             user_file_id=None,
-            command_type=CommandType.DELETE.value,
+            command_type=CommandType.DELETE_NAMESPACE.value,
             payload_json=payload,
             status=CommandStatus.PENDING.value,
         )
@@ -797,7 +892,6 @@ class SyncService:
             file_id=user_file.file_id,
             namespace_id=user_file.namespace_id,
             custom_title=conflict_title,
-            vault_relative_path=None,
             updated_at=datetime.utcnow(),
             desktop_updated_at=user_file.desktop_updated_at,
             app_updated_at=user_file.app_updated_at,
@@ -818,12 +912,8 @@ class SyncService:
         content_text: str,
         content_hash: str,
         filename: str,
-        vault_relative_path: str,
     ) -> FileInfo:
-        touch_updates = self._build_user_file_touch_updates(
-            source="desktop",
-            vault_relative_path=vault_relative_path,
-        )
+        touch_updates = self._build_user_file_touch_updates(source="desktop")
         file_ext = self._file_ext(filename)
         updated_meta = {
             **(content_file.media_metadata or {}),
@@ -966,20 +1056,18 @@ class SyncService:
                 content_text=incoming_text,
                 content_hash=incoming_hash,
                 filename=safe_filename,
-                vault_relative_path=upload_request.vault_relative_path,
             )
             await self.db.commit()
             return SyncUploadResponse(file=file_info, created=False)
 
-        vault_path = upload_request.vault_relative_path.replace("\\", "/")
-        parts = vault_path.split("/")
-        # убираем имя файла, оставляем только директории
-        folder_parts = parts[:-1] if len(parts) > 1 else []
-
-        namespace_id = await self._resolve_namespace_from_path(
-            user_id=user_id,
-            folder_parts=folder_parts,
-        )
+        if upload_request.namespace_id is None:
+            raise ValidationError("Для нового файла нужно передать namespace_id")
+        namespace = await self.namespace_repository.get_by_id(upload_request.namespace_id)
+        if namespace is None:
+            raise NotFoundError(f"Пространство с id {upload_request.namespace_id} не найдено")
+        if namespace.user_id != user_id:
+            raise ForbiddenError("У вас нет доступа к этому пространству")
+        namespace_id = namespace.id
 
         content_file_entity = await self.file_repository.get_by_content_hash(incoming_hash)
         if content_file_entity is None:
@@ -1019,7 +1107,6 @@ class SyncService:
             user_file = await self.user_file_repository.update_sync_metadata(
                 existing_user_file.id,
                 custom_title=safe_filename,
-                vault_relative_path=upload_request.vault_relative_path,
                 updated_at=now,
                 desktop_updated_at=now,
                 last_update_source="desktop",
@@ -1033,7 +1120,6 @@ class SyncService:
                 file_id=content_file_entity.id,
                 namespace_id=namespace_id,
                 custom_title=safe_filename,
-                vault_relative_path=upload_request.vault_relative_path,
                 updated_at=now,
                 desktop_updated_at=now,
                 last_update_source="desktop",

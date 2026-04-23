@@ -16,7 +16,12 @@ from app.schemas.file import (
     SyncUploadRequest,
     SyncUploadResponse,
 )
-from app.schemas.namespace import SyncNamespaceCreate, NamespaceStructureItem
+from app.schemas.namespace import (
+    NamespaceMoveRequest,
+    NamespaceRenameRequest,
+    SyncNamespaceCreate,
+    NamespaceStructureItem,
+)
 from app.schemas.user import UserResponse
 from app.services.sync_service import SyncService
 
@@ -25,9 +30,8 @@ router = APIRouter()
 
 @router.post("/upload", response_model=ResponseMessage[SyncUploadResponse])
 async def sync_upload(
-    relative_path: str = Form(...),
-    vault_name: str = Form("Vault"),
     user_file_id: Optional[int] = Form(None),
+    namespace_id: Optional[int] = Form(None),
     file: UploadFile = File(...),
     user: UserResponse = Depends(get_user_by_watcher_token),
     sync_service: SyncService = Depends(get_sync_service),
@@ -37,11 +41,10 @@ async def sync_upload(
     Вотчер отправляет file (бинарный) или content (текст).
     """
     upload_bytes = await file.read()
-    filename = file.filename or relative_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    filename = file.filename or "unnamed_file"
     body = SyncUploadRequest(
         user_file_id=user_file_id,
-        vault_name=vault_name,
-        vault_relative_path=relative_path,
+        namespace_id=namespace_id,
         filename=filename,
         file_bytes=upload_bytes,
     )
@@ -142,6 +145,47 @@ async def delete_sync_namespace(
     await sync_service.apply_desktop_delete_namespace(
         user_id=user.id,
         namespace_id=namespace_id,
+    )
+
+
+@router.put(
+    "/namespaces/{namespace_id}/move",
+    response_model=ResponseMessage[NamespaceStructureItem],
+)
+async def move_sync_namespace(
+    namespace_id: int,
+    body: NamespaceMoveRequest,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    namespace_service: NamespaceService = Depends(get_namespace_service),
+) -> ResponseMessage[NamespaceStructureItem]:
+    """
+    Перемещение пространства на сервере по запросу watcher'а.
+    """
+    result = await namespace_service.move_namespace(
+        namespace_id=namespace_id,
+        user_id=user.id,
+        target_parent_id=body.target_parent_id,
+        notify_watcher=False,
+    )
+    return ResponseMessage[NamespaceStructureItem](data=result)
+
+
+@router.put("/namespaces/{namespace_id}/rename", status_code=status.HTTP_204_NO_CONTENT)
+async def rename_sync_namespace(
+    namespace_id: int,
+    body: NamespaceRenameRequest,
+    user: UserResponse = Depends(get_user_by_watcher_token),
+    namespace_service: NamespaceService = Depends(get_namespace_service),
+) -> None:
+    """
+    Переименование пространства на сервере по запросу watcher'а.
+    """
+    await namespace_service.update_namespace(
+        namespace_id=namespace_id,
+        user_id=user.id,
+        name=body.new_name,
+        description=None,
+        notify_watcher=False,
     )
 
 

@@ -12,6 +12,7 @@ from app.schemas.file import (
     FileResponse,
     FileInfo,
     FileVersionInfo,
+    FileRenameRequest,
 )
 from app.schemas.content import AttachFileRequest, AttachFileResponse
 from app.services.file_service import FileService
@@ -251,7 +252,37 @@ async def replace_file_content(
     if not filename or not file_content:
         raise ValidationError("Файл не передан или пуст")
 
-    file_info = await file_service.replace_file_content(
+    file_info = await file_service.replace_file_upload(
+        file_id=file_id,
+        user_id=user.id,
+        file_content=file_content,
+        filename=filename,
+        base_hash=base_hash,
+        force_overwrite=force_overwrite,
+    )
+    return ResponseMessage[FileInfo](status="success", data=file_info)
+
+
+@router.put("/{file_id}/replace", response_model=ResponseMessage[FileInfo])
+async def replace_file_upload(
+    file_id: int,
+    file: UploadFile = File(..., description="Новый файл для замены текущего"),
+    base_hash: Optional[str] = Form(None, description="SHA256 файла на момент открытия карточки"),
+    force_overwrite: bool = Form(False, description="Разрешить осознанную перезапись при конфликте"),
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+) -> ResponseMessage[FileInfo]:
+    """
+    Безопасная замена файла новым upload'ом.
+
+    Используется для сценария "заменить файл", в том числе для PDF/DOCX.
+    """
+    file_content = await file.read()
+    filename = decode_filename(file.filename or "unnamed_file")
+    if not filename or not file_content:
+        raise ValidationError("Файл не передан или пуст")
+
+    file_info = await file_service.replace_file_upload(
         file_id=file_id,
         user_id=user.id,
         file_content=file_content,
@@ -286,6 +317,26 @@ async def delete_file(
         file_id=file_id,
         user_id=user.id,
     )
+
+
+@router.patch("/{file_id}/rename", response_model=ResponseMessage[FileInfo])
+async def rename_file(
+    file_id: int,
+    body: FileRenameRequest,
+    user: UserResponse = Depends(get_current_user),
+    file_service: FileService = Depends(get_file_service),
+) -> ResponseMessage[FileInfo]:
+    """
+    Переименовывает файл.
+
+    Аутентификация: JWT.
+    """
+    file_info = await file_service.rename_file(
+        file_id=file_id,
+        user_id=user.id,
+        new_title=body.new_title,
+    )
+    return ResponseMessage[FileInfo](data=file_info)
 
 
 @router.patch("/{file_id}/move", response_model=ResponseMessage[FileInfo])

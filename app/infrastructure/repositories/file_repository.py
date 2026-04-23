@@ -71,6 +71,13 @@ class PgFileRepository:
         await self.db.flush()
         return self._to_entity(content_file)
 
+    async def delete(self, file: FileEntity) -> None:
+        row = await self.db.get(File, file.id)
+        if row is None:
+            return
+        await self.db.delete(row)
+        await self.db.flush()
+
     async def update_content_metadata(
         self,
         file_id: int,

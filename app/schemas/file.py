@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 from typing import Any, Literal, Optional, TypedDict
 from enum import Enum
@@ -70,7 +70,6 @@ class FileInfo(BaseModel):
     app_updated_at: Optional[datetime] = None
     last_update_source: Optional[str] = None
     content_hash: str
-    vault_relative_path: Optional[str] = None
     is_conflict_copy: bool = False
 
     class Config:
@@ -98,6 +97,11 @@ class FileCreated(BaseModel):
     text: str  # Текст для передачи в Celery задачу
     is_new_file: bool = True  # False если File уже существовал (дедупликация по содержимому)
     is_new_user_file: bool = True  # False если UserFile для этого user+namespace уже существовал
+
+
+class FileRenameRequest(BaseModel):
+    """Запрос на переименование файла."""
+    new_title: str = Field(..., min_length=1, max_length=255, description="Новое имя файла")
 
 
 class IngestUrlResult(BaseModel):
@@ -166,7 +170,6 @@ class FileVersionInfo(BaseModel):
     app_updated_at: Optional[datetime] = None
     last_update_source: Optional[str] = None
     content_hash: str
-    vault_relative_path: Optional[str] = None
 
 
 class SyncConflictInfo(BaseModel):
@@ -178,10 +181,15 @@ class SyncConflictInfo(BaseModel):
 class SyncUploadRequest(BaseModel):
     """Запрос от Desktop Watcher на отправку локальной версии файла."""
     user_file_id: Optional[int] = Field(None, description="ID user_files, если уже известен watcher")
-    vault_name: Optional[str] = Field(None, description="Имя корневой папки vault на ПК")
-    vault_relative_path: str = Field(..., description="Путь файла относительно desktop vault")
+    namespace_id: Optional[int] = Field(None, description="ID пространства для нового файла")
     filename: str = Field(..., description="Имя файла")
     file_bytes: bytes = Field(..., description="Содержимое файла в виде bytes")
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "SyncUploadRequest":
+        if self.user_file_id is not None or self.namespace_id is not None:
+            return self
+        raise ValueError("Нужно передать либо user_file_id, либо namespace_id")
 
 class SyncUploadResponse(BaseModel):
     """Результат принятия desktop upload."""
@@ -199,11 +207,15 @@ class CommandStatus(str, Enum):
 
 class CommandType(str, Enum):
     """Тип команды."""
-    UPSERT = "upsert"
-    DELETE = "delete"
-    RENAME = "rename"
-    MOVE = "move"
-    TRASH = "trash"
+    UPSERT_FILE = "upsert_file"
+    MOVE_FILE = "move_file"
+    RENAME_FILE = "rename_file"
+    TRASH_FILE = "trash_file"
+    DELETE_FILE = "delete_file"
+    MOVE_NAMESPACE = "move_namespace"
+    RENAME_NAMESPACE = "rename_namespace"
+    TRASH_NAMESPACE = "trash_namespace"
+    DELETE_NAMESPACE = "delete_namespace"
 
 class SyncCommandItem(BaseModel):
     """Команда для Desktop Watcher."""

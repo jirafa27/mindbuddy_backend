@@ -35,6 +35,7 @@ from app.core.exceptions import (
 )
 from app.services.file_content_service import FileContentService
 from app.services.text_chunker import TextChunkerService
+from app.utils.file import can_inline_edit_file
 from app.utils.file_readers import FileReaderFactory
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,6 @@ class FileService:
             app_updated_at=getattr(user_file, "app_updated_at", None),
             last_update_source=getattr(user_file, "last_update_source", None),
             content_hash=content_file.content_hash,
-            vault_relative_path=getattr(user_file, "vault_relative_path", None),
             is_conflict_copy=getattr(user_file, "is_conflict_copy", False),
         )
 
@@ -177,6 +177,41 @@ class FileService:
         if isinstance(content, str):
             content = content.encode("utf-8")
         return hashlib.sha256(content).hexdigest()
+
+    async def _delete_orphaned_content_file(self, content_file: Any) -> None:
+        if not content_file or not self.file_repository or not self.user_file_repository:
+            return
+
+        remaining_refs = await self.user_file_repository.count_by_file_id(content_file.id)
+        if remaining_refs > 0:
+            return
+
+        if self.summary_repository:
+            await self.summary_repository.delete_by_file_id(content_file.id)
+        if self.vector_repository:
+            await self.vector_repository.delete_by_file_id(content_file.id)
+        if content_file.file_path:
+            try:
+                await self.storage.delete_file(content_file.file_path)
+            except Exception:
+                logger.warning(
+                    "[FileService] Failed to delete orphaned object from storage: %s",
+                    content_file.file_path,
+                )
+        await self.file_repository.delete(content_file)
+
+    async def _notify_replace_file_sync(self, *, user_file_id: int, user_id: int) -> None:
+        if not self.sync_notifier:
+            return
+        await self.sync_notifier.add_delete_file_command_to_queue(
+            user_file_id=user_file_id,
+            user_id=user_id,
+        )
+        await self.sync_notifier.add_upsert_command_to_queue(
+            user_file_id=user_file_id,
+            user_id=user_id,
+            command_type=CommandType.UPSERT_FILE,
+        )
 
     async def check_deduplication(
         self,
@@ -585,7 +620,7 @@ class FileService:
                 await self.sync_notifier.add_upsert_command_to_queue(
                     user_file_id=user_file.id,
                     user_id=user_id,
-                    command_type=CommandType.UPSERT,
+                    command_type=CommandType.UPSERT_FILE,
                 )
             await self.db.commit()
             logger.info("File created in DB: user_file_id=%s, content_file_id=%s, filename=%s", user_file.id, content_file.id, filename)
@@ -652,7 +687,7 @@ class FileService:
                         await self.sync_notifier.add_upsert_command_to_queue(
                             user_file_id=user_file.id,
                             user_id=user_id,
-                            command_type=CommandType.UPSERT,
+                            command_type=CommandType.UPSERT_FILE,
                         )
                     await self.db.commit()
                     logger.info(
@@ -860,7 +895,7 @@ class FileService:
                 await self.sync_notifier.add_upsert_command_to_queue(
                     user_file_id=user_file.id,
                     user_id=user_id,
-                    command_type=CommandType.UPSERT,
+                    command_type=CommandType.UPSERT_FILE,
                 )
             await self.db.commit()
             logger.info("[FileService] Created file record: user_file_id=%d, source=%s", user_file.id, source_url)
@@ -977,10 +1012,9 @@ class FileService:
                 if not moved:
                     raise NotFoundError(f"Файл с ID {existing.id} не найден")
                 if self.sync_notifier:
-                    await self.sync_notifier.add_upsert_command_to_queue(
+                    await self.sync_notifier.add_move_command_to_queue(
                         user_file_id=moved.id,
                         user_id=user_id,
-                        command_type=CommandType.MOVE,
                     )
                 await self.db.commit()
                 logger.info(
@@ -1002,7 +1036,7 @@ class FileService:
             await self.sync_notifier.add_upsert_command_to_queue(
                 user_file_id=user_file.id,
                 user_id=user_id,
-                command_type=CommandType.UPSERT,
+                command_type=CommandType.UPSERT_FILE,
             )
         await self.db.commit()
         logger.info(
@@ -1070,7 +1104,6 @@ class FileService:
             app_updated_at=info.app_updated_at,
             last_update_source=info.last_update_source,
             content_hash=info.content_hash,
-            vault_relative_path=info.vault_relative_path,
         )
 
     async def move_to_namespace(
@@ -1113,10 +1146,9 @@ class FileService:
         if not moved:
             raise NotFoundError(f"Файл с id {file_id} не найден")
         if self.sync_notifier:
-            await self.sync_notifier.add_upsert_command_to_queue(
+            await self.sync_notifier.add_move_command_to_queue(
                 user_file_id=moved.id,
                 user_id=user_id,
-                command_type=CommandType.MOVE,
             )
         await self.db.commit()
 
@@ -1196,9 +1228,19 @@ class FileService:
         if not content_file.file_path:
             raise NotFoundError("File path not found in storage")
 
+        original_file_type = (content_file.media_metadata or {}).get("file_type")
+        if not can_inline_edit_file(original_file_type):
+            raise ValidationError(
+                "Inline-редактирование доступно только для текстовых файлов. Для PDF/DOCX используй замену файла."
+            )
+
         file_ext = await self._validate_upload_params(
             filename, file_content, user_id, user_file.namespace_id
         )
+        if not can_inline_edit_file(file_ext):
+            raise ValidationError(
+                "Inline-редактирование доступно только для текстовых файлов. Для PDF/DOCX используй замену файла."
+            )
         text = self._extract_text_from_file(file_content, file_ext)
         if not text or not text.strip():
             raise ValidationError("File content is empty or could not be processed")
@@ -1247,11 +1289,10 @@ class FileService:
             # Переключаем UserFile на новый File
             await self.user_file_repository.update_file_id(user_file.id, new_file.id)
             # Обновляем custom_title
-            if self.db:
-                from sqlalchemy import update
-                await self.db.execute(
-                    update(UserFile).where(UserFile.id == user_file.id).values(custom_title=filename)
-                )
+            await self.user_file_repository.update_sync_metadata(
+                user_file.id,
+                custom_title=filename,
+            )
             # Запускаем индексацию для нового File
             if publisher:
                 publisher.send_embeddings_task(
@@ -1263,12 +1304,10 @@ class FileService:
                 )
                 logger.info("[FileService] COW: sent embeddings task for new file %d", new_file.id)
 
-            if self.sync_notifier:
-                await self.sync_notifier.add_upsert_command_to_queue(
-                    user_file_id=user_file.id,
-                    user_id=user_id,
-                    command_type=CommandType.UPSERT,
-                )
+            await self._notify_replace_file_sync(
+                user_file_id=user_file.id,
+                user_id=user_id,
+            )
             await self.db.commit()
             return await self.get_file_info(file_id=file_id, user_id=user_id)
 
@@ -1287,11 +1326,10 @@ class FileService:
             transcript_text=text,
         )
 
-        if self.db:
-            from sqlalchemy import update
-            await self.db.execute(
-                update(UserFile).where(UserFile.id == user_file.id).values(custom_title=filename)
-            )
+        await self.user_file_repository.update_sync_metadata(
+            user_file.id,
+            custom_title=filename,
+        )
 
         summary_repo = summary_repository or self.summary_repository
         if summary_repo:
@@ -1312,11 +1350,118 @@ class FileService:
             )
             logger.info("[FileService] Sent embeddings task for replaced file %d", file_id)
 
+        await self._notify_replace_file_sync(
+            user_file_id=user_file.id,
+            user_id=user_id,
+        )
+        await self.db.commit()
+        return await self.get_file_info(file_id=file_id, user_id=user_id)
+
+    async def replace_file_upload(
+        self,
+        file_id: int,
+        user_id: int,
+        file_content: bytes,
+        filename: str,
+        *,
+        base_hash: Optional[str] = None,
+        force_overwrite: bool = False,
+        task_publisher: Optional[TaskPublisher] = None,
+    ) -> FileInfo:
+        """Полная замена файла: создаёт/переиспользует новый content file и переключает user_file на него."""
         if self.sync_notifier:
-            await self.sync_notifier.add_upsert_command_to_queue(
+            await self.sync_notifier.assert_can_save(
+                user_file_id=file_id,
+                user_id=user_id,
+                base_hash=base_hash,
+                force_overwrite=force_overwrite,
+            )
+
+        user_file = await self.user_file_repository.get_by_id(file_id)
+        if not user_file:
+            raise NotFoundError(f"File with id {file_id} not found")
+        if user_file.user_id != user_id:
+            raise ForbiddenError("You don't have access to this file")
+
+        old_content_file = await self.file_repository.get_by_id(user_file.file_id)
+        if not old_content_file:
+            raise NotFoundError("File content record not found")
+
+        file_ext = await self._validate_upload_params(
+            filename, file_content, user_id, user_file.namespace_id
+        )
+        text = self._extract_text_from_file(file_content, file_ext)
+        if not text or not text.strip():
+            raise ValidationError("File content is empty or could not be processed")
+
+        new_hash = self.compute_content_hash(file_content)[:64]
+        publisher = task_publisher or self.task_publisher
+        new_content_file = old_content_file
+        uploaded_object_name: Optional[str] = None
+
+        existing_content_file = await self.file_repository.get_by_content_hash(new_hash)
+        if existing_content_file and existing_content_file.id != old_content_file.id:
+            new_content_file = existing_content_file
+        elif old_content_file.content_hash != new_hash:
+            uploaded_object_name = self.storage.generate_object_name(
+                user_id=user_id,
+                namespace_id=user_file.namespace_id,
+                filename=filename,
+            )
+            await self.storage.upload_file(
+                file_content=file_content,
+                object_name=uploaded_object_name,
+                content_type=self._get_content_type(file_ext),
+                metadata={
+                    "user_id": str(user_id),
+                    "namespace_id": str(user_file.namespace_id or ""),
+                    "original_filename": base64.b64encode(filename.encode("utf-8")).decode("ascii"),
+                },
+            )
+            new_content_file = await self.file_repository.create(
+                content_hash=new_hash,
+                file_path=uploaded_object_name,
+                transcript_text=text,
+                media_metadata={
+                    "title": filename,
+                    "file_type": file_ext,
+                    "file_size": len(file_content),
+                },
+                processing_status="pending",
+            )
+
+        try:
+            if new_content_file.id != old_content_file.id:
+                await self.user_file_repository.update_file_id(user_file.id, new_content_file.id)
+            await self.user_file_repository.update_sync_metadata(
+                user_file.id,
+                custom_title=filename,
+            )
+
+            if new_content_file.id != old_content_file.id:
+                await self._delete_orphaned_content_file(old_content_file)
+                if publisher and new_content_file.id != (existing_content_file.id if existing_content_file else None):
+                    publisher.send_embeddings_task(
+                        content_file_id=new_content_file.id,
+                        text=text,
+                        namespace_id=user_file.namespace_id,
+                        filename=filename,
+                        user_file_id=user_file.id,
+                    )
+
+            await self._notify_replace_file_sync(
                 user_file_id=user_file.id,
                 user_id=user_id,
-                command_type=CommandType.UPSERT,
             )
-        await self.db.commit()
+
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            if uploaded_object_name is not None:
+                try:
+                    await self.storage.delete_file(uploaded_object_name)
+                except Exception:
+                    pass
+            raise
+
         return await self.get_file_info(file_id=file_id, user_id=user_id)

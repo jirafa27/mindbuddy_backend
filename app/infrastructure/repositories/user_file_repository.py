@@ -19,7 +19,6 @@ class PgUserFileRepository:
             file_id=model.file_id,
             namespace_id=model.namespace_id,
             custom_title=model.custom_title,
-            vault_relative_path=model.vault_relative_path,
             created_at=model.created_at,
             updated_at=model.updated_at,
             desktop_updated_at=model.desktop_updated_at,
@@ -112,7 +111,6 @@ class PgUserFileRepository:
         file_id: int,
         namespace_id: Optional[int] = None,
         custom_title: Optional[str] = None,
-        vault_relative_path: Optional[str] = None,
         updated_at: Optional[datetime] = None,
         desktop_updated_at: Optional[datetime] = None,
         app_updated_at: Optional[datetime] = None,
@@ -125,7 +123,6 @@ class PgUserFileRepository:
             file_id=file_id,
             namespace_id=namespace_id,
             custom_title=custom_title,
-            vault_relative_path=vault_relative_path,
             updated_at=updated_at,
             desktop_updated_at=desktop_updated_at,
             app_updated_at=app_updated_at,
@@ -199,7 +196,6 @@ class PgUserFileRepository:
         *,
         file_id: Optional[int] = None,
         custom_title: Optional[str] = None,
-        vault_relative_path: Optional[str] = None,
         updated_at: Optional[datetime] = None,
         desktop_updated_at: Optional[datetime] = None,
         app_updated_at: Optional[datetime] = None,
@@ -213,8 +209,6 @@ class PgUserFileRepository:
             row.file_id = file_id
         if custom_title is not None:
             row.custom_title = custom_title
-        if vault_relative_path is not None:
-            row.vault_relative_path = vault_relative_path
         if updated_at is not None:
             row.updated_at = updated_at
         if desktop_updated_at is not None:

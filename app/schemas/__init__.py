@@ -24,6 +24,8 @@ from app.schemas.file import (
 
 from app.schemas.namespace import (
     NamespaceCreate,
+    NamespaceMoveRequest,
+    NamespaceRenameRequest,
     NamespaceUpdate,
     NamespaceResponse,
     NamespaceListItem,
@@ -68,6 +70,8 @@ __all__ = [
     "SyncConflictInfo",
     "DeduplicationResult",
     "NamespaceCreate",
+    "NamespaceMoveRequest",
+    "NamespaceRenameRequest",
     "NamespaceUpdate",
     "NamespaceResponse",
     "NamespaceListItem",

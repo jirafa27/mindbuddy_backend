@@ -135,7 +135,6 @@ class UserFile(Base):
         Integer, ForeignKey("namespaces.id"), nullable=True, index=True
     )
     custom_title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    vault_relative_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True, index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )

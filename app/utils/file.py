@@ -1,5 +1,44 @@
-"""Утилиты для работы с именами файлов"""
+"""Утилиты для работы с файлами и их именами."""
+from typing import Optional
 from urllib.parse import unquote, quote
+
+
+TEXT_INLINE_EDITABLE_EXTENSIONS = frozenset(
+    {
+        "txt",
+        "md",
+        "json",
+        "py",
+        "js",
+        "ts",
+        "jsx",
+        "tsx",
+        "html",
+        "css",
+        "scss",
+        "xml",
+        "csv",
+        "yml",
+        "yaml",
+        "ini",
+        "toml",
+        "sql",
+    }
+)
+
+
+def normalize_file_ext(file_ext: Optional[str]) -> str:
+    if not file_ext:
+        return ""
+    return str(file_ext).strip().lower().lstrip(".")
+
+
+def can_inline_edit_file(file_ext: Optional[str]) -> bool:
+    return normalize_file_ext(file_ext) in TEXT_INLINE_EDITABLE_EXTENSIONS
+
+
+def should_include_text_content_in_sync(file_ext: Optional[str]) -> bool:
+    return can_inline_edit_file(file_ext)
 
 
 def decode_filename(filename: str) -> str:

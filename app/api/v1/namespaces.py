@@ -5,6 +5,7 @@ import logging
 from app.utils.file import decode_filename
 from app.schemas import (
     NamespaceCreate,
+    NamespaceMoveRequest,
     NamespaceUpdate,
     NamespaceResponse,
     NamespaceListItem,
@@ -219,6 +220,26 @@ async def update_namespace(
         description=namespace.description,
     )
     return ResponseMessage(data=updated)
+
+
+@router.patch(
+    "/{namespace_id}/move",
+    response_model=ResponseMessage[NamespaceResponse],
+    summary="Переместить namespace",
+)
+async def move_namespace(
+    namespace_id: int,
+    body: NamespaceMoveRequest,
+    user: UserResponse = Depends(get_current_user),
+    service: NamespaceService = Depends(get_namespace_service),
+):
+    """Перемещает namespace в другое пространство. Аутентификация: JWT."""
+    moved = await service.move_namespace(
+        namespace_id=namespace_id,
+        user_id=user.id,
+        target_parent_id=body.target_parent_id,
+    )
+    return ResponseMessage(data=moved)
 
 
 @router.delete(

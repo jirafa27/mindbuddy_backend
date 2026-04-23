@@ -28,8 +28,11 @@ from app.domain.protocols import LLMProvider, FileStorage, TaskPublisher
 from app.services.file_service import FileService
 from app.services.namespace_service import NamespaceService
 from app.services.content_extractor import ContentExtractorService
+from app.utils.file import can_inline_edit_file
 from app.utils.url import is_http_url_only
 from app.graph.utils.namespace import resolve_namespace_id
+from app.utils.file_readers import FileReaderFactory
+
 
 logger = logging.getLogger(__name__)
 
@@ -928,11 +931,13 @@ class CrudNode:
         file_ext = meta.get("file_type", "md")
         filename = user_file.custom_title or meta.get("title", "document")
 
-        # Запрещаем редактирование PDF файлов
-        if file_ext.lower() == "pdf":
-            return {"ok": False, "error": "Редактирование PDF файлов не поддерживается.", "filename": filename}
+        if not can_inline_edit_file(file_ext):
+            return {
+                "ok": False,
+                "error": "Inline-редактирование доступно только для текстовых файлов. Используй замену файла upload'ом.",
+                "filename": filename,
+            }
 
-        from app.utils.file_readers import FileReaderFactory
         try:
             reader = FileReaderFactory().get_reader(file_ext)
             current_text = reader.read(file_bytes)
@@ -998,37 +1003,14 @@ class CrudNode:
                 edited_text = edited_text + current_text[max_text_chars:]
                 logger.info("[CrudNode] Reappended tail: tail_len=%d final_len=%d", tail_len, len(edited_text))
 
-        # Записываем отредактированный текст обратно в оригинальном формате
-        if file_ext == "docx":
-            # Пересобираем .docx из отредактированного текста
-            import io
-            from docx import Document as DocxDocument
-            doc = DocxDocument()
-            for paragraph_text in edited_text.split("\n"):
-                doc.add_paragraph(paragraph_text)
-            buf = io.BytesIO()
-            doc.save(buf)
-            save_content = buf.getvalue()
-            save_filename = filename
-            if not save_filename.lower().endswith(".docx"):
-                save_filename = save_filename.rsplit(".", 1)[0] + ".docx" if "." in save_filename else save_filename + ".docx"
-            logger.info("[CrudNode] Converting to DOCX for file %s: edited_text_len=%d → saved_content_bytes=%d", 
-                        filename, len(edited_text), len(save_content))
-        elif file_ext == "pdf":
-            # PDF нельзя легко пересобрать — сохраняем как .md
-            save_content = edited_text.encode("utf-8")
-            save_filename = filename.rsplit(".", 1)[0] + ".md" if "." in filename else filename + ".md"
-            if not save_filename.endswith(".md"):
-                save_filename = f"{save_filename}.md"
-            logger.info("[CrudNode] Converting PDF to MD for file %s: edited_text_len=%d → saved_filename=%s saved_bytes=%d", 
-                        filename, len(edited_text), save_filename, len(save_content))
-        else:
-            save_content = edited_text.encode("utf-8")
-            save_filename = filename
-            if not save_filename.endswith(f".{file_ext}"):
-                save_filename = f"{save_filename}.{file_ext}"
-            logger.info("[CrudNode] Saving %s for file %s: edited_text_len=%d → saved_bytes=%d", 
-                        file_ext, filename, len(edited_text), len(save_content))
+        save_content = edited_text.encode("utf-8")
+        save_filename = filename
+        if not save_filename.endswith(f".{file_ext}"):
+            save_filename = f"{save_filename}.{file_ext}"
+        logger.info(
+            "[CrudNode] Saving %s for file %s: edited_text_len=%d → saved_bytes=%d",
+            file_ext, filename, len(edited_text), len(save_content),
+        )
 
         file_info = await self.file_service.replace_file_content(
             file_id=file_id,

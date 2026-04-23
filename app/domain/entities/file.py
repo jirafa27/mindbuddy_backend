@@ -24,7 +24,6 @@ class UserFileEntity:
     file_id: int
     namespace_id: Optional[int] = None
     custom_title: Optional[str] = None
-    vault_relative_path: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     desktop_updated_at: Optional[datetime] = None

@@ -154,7 +154,6 @@ class UserFileRepository(Protocol):
         file_id: int,
         namespace_id: Optional[int] = None,
         custom_title: Optional[str] = None,
-        vault_relative_path: Optional[str] = None,
         updated_at: Optional[datetime] = None,
         desktop_updated_at: Optional[datetime] = None,
         app_updated_at: Optional[datetime] = None,
@@ -197,7 +196,6 @@ class UserFileRepository(Protocol):
         *,
         file_id: Optional[int] = None,
         custom_title: Optional[str] = None,
-        vault_relative_path: Optional[str] = None,
         updated_at: Optional[datetime] = None,
         desktop_updated_at: Optional[datetime] = None,
         app_updated_at: Optional[datetime] = None,
@@ -474,7 +472,6 @@ class FileSyncNotifier(Protocol):
         user_file_id: int,
         user_id: int,
         command_type: Any = None,
-        vault_relative_path: Optional[str] = None,
     ) -> Any:
         """Добавляет команду на обновление файла в очередь синхронизации."""
         ...
@@ -497,6 +494,44 @@ class FileSyncNotifier(Protocol):
         new_title: str,
     ) -> Any:
         """Добавляет команду на переименование файла в очередь синхронизации."""
+        ...
+
+    async def add_move_command_to_queue(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+    ) -> Any:
+        """Добавляет команду на перемещение файла в очередь синхронизации."""
+        ...
+
+    async def add_delete_file_command_to_queue(
+        self,
+        *,
+        user_file_id: int,
+        user_id: int,
+    ) -> Any:
+        """Добавляет команду на удаление локальной копии файла в очередь синхронизации."""
+        ...
+
+    async def add_rename_namespace_command_to_queue(
+        self,
+        *,
+        namespace_id: int,
+        user_id: int,
+        new_name: str,
+    ) -> Any:
+        """Добавляет команду на переименование namespace в очередь синхронизации."""
+        ...
+
+    async def add_move_namespace_command_to_queue(
+        self,
+        *,
+        namespace_id: int,
+        user_id: int,
+        target_parent_id: int,
+    ) -> Any:
+        """Добавляет команду на перемещение namespace в очередь синхронизации."""
         ...
 
     async def add_delete_namespace_command_to_queue(
