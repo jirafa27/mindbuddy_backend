@@ -17,7 +17,7 @@ from app.schemas.base import ResponseMessage
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/summary", tags=["Summary"])
+router = APIRouter(prefix="/summary")
 
 
 async def _run_summary_url(

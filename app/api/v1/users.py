@@ -5,7 +5,7 @@ from app.schemas.user import TokenResponse
 from app.services.user_service import UserService
 from app.core.dependencies import get_user_service, get_current_user
 from app.core.security import create_access_token
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ForbiddenError, NotFoundError
 
 router = APIRouter()
 
@@ -52,9 +52,12 @@ async def get_me(
 )
 async def get_user(
     user_id: int,
+    current_user: UserResponse = Depends(get_current_user),
     user_service: UserService = Depends(get_user_service),
 ):
-    """Получить пользователя по внутреннему ID."""
+    """Получить текущего пользователя по его внутреннему ID."""
+    if user_id != current_user.id:
+        raise ForbiddenError("Можно запрашивать только собственный профиль")
     user = await user_service.get_user(user_id=user_id)
     if not user:
         raise NotFoundError(f"Пользователь с ID {user_id} не найден")
