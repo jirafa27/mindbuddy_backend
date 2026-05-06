@@ -159,26 +159,19 @@ class RouterNode:
                 ],
             }
 
-        # Fast path: файл + вопрос → сначала save_file в Inbox, затем rag_query по этому файлу
+        # Файл + текст требует анализа намерения:
+        # это может быть вопрос к файлу, сохранение в указанное пространство,
+        # создание пространства + сохранение, суммаризация и т.д.
         if has_file and question:
-            logger.info("[Router] Fast path: save_file + rag_query (file with question)")
-            namespace_id, ns_hint = await self._inbox_namespace_if_unset(
-                None, None, config, user_id
-            )
+            logger.info("[Router] File with text → IntentNode")
             return {
                 **state,
-                "intent": IntentType.SAVE_FILE,
                 "detected_url": effective_detected_url,
-                "namespace_id": namespace_id,
-                "namespace_name_hint": ns_hint,
                 "url_in_current_message": url_in_current_message,
                 "has_history_url": bool(history_url),
                 "history_file_id": history_file_id,
-                # search_query сигнализирует SaveFileNode установить file_save_notice
-                # вместо answer, что запускает маршрут → compute_query_embedding
-                "search_query": question,
                 "agent_steps": state.get("agent_steps", []) + [
-                    "[Router] Fast path: save_file + rag_query (file with question)"
+                    "[Router] File with text → IntentNode"
                 ],
             }
 

@@ -126,11 +126,6 @@ class FileAgent:
                         existing_user_file.id,
                         existing_content.id,
                     )
-                    already_msg = (
-                        f"Файл «{filename}» уже есть в пространстве «{namespace_name_hint or namespace_id}»."
-                        if namespace_id
-                        else f"Файл «{filename}» уже есть в базе знаний."
-                    )
                     # file_blob_key больше не нужен — SaveFileNode его не будет вызывать
                     await self.blob_storage.delete_blob(file_blob_key)
                     return {
@@ -139,7 +134,6 @@ class FileAgent:
                         "content_already_indexed": False,
                         "early_duplicate": True,
                         "file_id": existing_user_file.id,
-                        "answer": already_msg,
                         "search_file_ids": [existing_user_file.id],
                     }
                 else:

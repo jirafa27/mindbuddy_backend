@@ -34,7 +34,6 @@ class SaveFileNode:
     async def run(self, state: AskState, config: RunnableConfig) -> dict[str, Any]:
         configurable = config.get("configurable") or {}
         async_db: AsyncSession | None = configurable.get("async_db")
-        file_repository = configurable.get("file_repository")
         vector_repository: VectorRepository | None = configurable.get("vector_repository")
 
         agent_steps = list(state.get("agent_steps") or []) + ["SaveFileNode"]
@@ -49,7 +48,7 @@ class SaveFileNode:
         namespace_id = state.get("namespace_id")
         search_query = state.get("search_query")
 
-        if user_id is None or file_repository is None:
+        if user_id is None:
             return {"agent_steps": agent_steps}
 
         all_answers: List[str] = []
@@ -69,6 +68,10 @@ class SaveFileNode:
                 )
             except Exception as e:
                 logger.exception("SaveFileNode: failed for file=%s", blob.get("filename"))
+                await self._cleanup_blobs(
+                    file_blob_key=blob.get("file_blob_key"),
+                    blob_key=blob.get("blob_key"),
+                )
                 db_error = str(e)
                 continue
 
@@ -127,22 +130,30 @@ class SaveFileNode:
 
         # Полный дубликат, обнаруженный FileAgent ещё до генерации эмбеддингов
         if blob.get("early_duplicate"):
+            ns_label = state.get("namespace_name_hint") or state.get("namespace_id")
+            answer = self._format_added_message(
+                filename=filename,
+                ns_label=ns_label,
+                namespace_created=state.get("namespace_created", False),
+            )
             return {
                 "file_id": blob.get("file_id"),
-                "answer": blob.get("answer", ""),
+                "answer": answer,
                 "search_file_ids": blob.get("search_file_ids") or [],
             }
 
         # Нечитаемый файл — пропускаем тихо
         if blob.get("parse_error"):
+            await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
             return {}
 
         if not (file_blob_key and filename):
+            await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
             return {}
 
         # Нет ни blob_key ни флага already_indexed — нечего делать
         if not blob_key and not content_already_indexed:
-            await self.blob_storage.delete_blob(file_blob_key)
+            await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
             return {}
 
         chunks = None
@@ -155,17 +166,18 @@ class SaveFileNode:
             )
             payload = await self.blob_storage.get_blob(blob_key)
             if payload is None:
-                await self.blob_storage.delete_blob(file_blob_key)
+                await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
                 raise RuntimeError(f"get_blob returned None for key={blob_key}")
             chunks = payload.get("chunks")
             embeddings = payload.get("embeddings")
             if not chunks or not embeddings:
-                await self.blob_storage.delete_blob(file_blob_key)
+                await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
                 return {"db_error": "Invalid blob: missing chunks or embeddings"}
 
         # Получаем сырые байты файла из MinIO
         file_payload = await self.blob_storage.get_blob(file_blob_key)
         if file_payload is None:
+            await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
             raise RuntimeError(f"get_blob returned None for file_blob_key={file_blob_key}")
         file_content: bytes = file_payload["raw"]
 
@@ -188,19 +200,16 @@ class SaveFileNode:
                     "SaveFileNode: full duplicate (user_file_id=%d, content_file_id=%d), skipping",
                     file_created.file_id, file_created.content_file_id,
                 )
-                if blob_key:
-                    await self.blob_storage.delete_blob(blob_key)
-                await self.blob_storage.delete_blob(file_blob_key)
-                ns_label_str = ns_hint or (str(namespace_id) if namespace_id else None)
-                already_msg = (
-                    f"Файл «{filename}» уже есть в пространстве «{ns_label_str}»."
-                    if ns_label_str else
-                    f"Файл «{filename}» уже есть в базе знаний."
+                await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
+                answer = self._format_added_message(
+                    filename=filename,
+                    ns_label=ns_label,
+                    namespace_created=namespace_created,
                 )
                 return {
                     "file_id": file_created.file_id,
                     "search_file_ids": [file_created.file_id],
-                    "answer": already_msg,
+                    "answer": answer,
                 }
 
             # Новый user_file, но контент уже существует — эмбеддинги уже есть в БД
@@ -208,23 +217,20 @@ class SaveFileNode:
                 "SaveFileNode: new UserFile for existing content (user_file_id=%d, content_file_id=%d), skipping embeddings",
                 file_created.file_id, file_created.content_file_id,
             )
-            if blob_key:
-                await self.blob_storage.delete_blob(blob_key)
-            await self.blob_storage.delete_blob(file_blob_key)
-            if namespace_created and ns_label:
-                existing_msg = f"Создал пространство «{ns_label}» и добавил туда файл «{filename}» (файл уже был в базе знаний)."
-            elif namespace_id:
-                existing_msg = f"Файл «{filename}» уже есть в базе знаний и был добавлен в пространство «{ns_hint or namespace_id}»."
-            else:
-                existing_msg = f"Файл «{filename}» уже есть в базе знаний."
+            await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
+            answer = self._format_added_message(
+                filename=filename,
+                ns_label=ns_label,
+                namespace_created=namespace_created,
+            )
             return {
                 "file_id": file_created.file_id,
                 "search_file_ids": [file_created.file_id],
-                "answer": existing_msg,
+                "answer": answer,
             }
 
         if vector_repository is None or not chunks or not embeddings:
-            await self.blob_storage.delete_blob(file_blob_key)
+            await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
             return {"db_error": "vector_repository not in config or missing chunks/embeddings"}
 
         await vector_repository.create_batch(
@@ -234,22 +240,43 @@ class SaveFileNode:
             namespace_id=namespace_id,
         )
         await async_db.commit()
-        if blob_key:
-            await self.blob_storage.delete_blob(blob_key)
-        await self.blob_storage.delete_blob(file_blob_key)
+        await self._cleanup_blobs(file_blob_key=file_blob_key, blob_key=blob_key)
 
-        if namespace_created and ns_label:
-            saved_msg = f"Создал пространство «{ns_label}» и добавил туда файл «{filename}»."
-        else:
-            ns_part = ""
-            if namespace_created and ns_label:
-                ns_part = f" в новое пространство «{ns_label}»"
-            elif ns_label:
-                ns_part = f" в пространство «{ns_label}»"
-            saved_msg = f"Файл «{filename}» сохранён{ns_part}."
+        answer = self._format_added_message(
+            filename=filename,
+            ns_label=ns_label,
+            namespace_created=namespace_created,
+        )
 
         return {
             "file_id": file_created.file_id,
             "search_file_ids": [file_created.file_id],
-            "answer": saved_msg,
+            "answer": answer,
         }
+
+    async def _cleanup_blobs(
+        self,
+        *,
+        file_blob_key: Optional[str],
+        blob_key: Optional[str],
+    ) -> None:
+        for key in (blob_key, file_blob_key):
+            if not key:
+                continue
+            try:
+                await self.blob_storage.delete_blob(key)
+            except Exception:
+                logger.warning("SaveFileNode: failed to cleanup blob key=%s", key, exc_info=True)
+
+    @staticmethod
+    def _format_added_message(
+        *,
+        filename: str,
+        ns_label: Optional[str | int],
+        namespace_created: bool,
+    ) -> str:
+        if namespace_created and ns_label:
+            return f"Создал пространство «{ns_label}» и добавил туда файл «{filename}»."
+        if ns_label:
+            return f"Файл «{filename}» добавлен в пространство «{ns_label}»."
+        return f"Файл «{filename}» добавлен."

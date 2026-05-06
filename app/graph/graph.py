@@ -70,6 +70,13 @@ def _route_after_resolver(state: AskState) -> str:
         return "multi_action_node"
 
     intent = state.get("intent")
+    if (
+        intent == IntentType.RAG_QUERY
+        and state.get("attached_files")
+        and not state.get("search_file_ids")
+    ):
+        return "file_agent"
+
     return _intent_to_node(intent)
 
 

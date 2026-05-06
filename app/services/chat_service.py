@@ -148,6 +148,7 @@ class ChatService:
         if not result_file_ids and result.get("file_id") is not None:
             result_file_ids = [result["file_id"]]
         is_save_file = result.get("intent") == "save_file" or override_intent == "save_file" or bool(files)
+        response_file_ids = [] if is_save_file else result_file_ids
 
         if self.chat_repository and resolved_chat_id is not None:
             await self._persist_turn(
@@ -159,7 +160,7 @@ class ChatService:
             answer=answer_text,
             sources=self._build_sources(result),
             agent_steps=result.get("agent_steps") or [],
-            file_ids=result_file_ids,
+            file_ids=response_file_ids,
             chat_id=resolved_chat_id,
         )
 
