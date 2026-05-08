@@ -111,7 +111,7 @@ async def test_delete_file_not_found(client, test_user, auth_headers):
 
 @pytest.mark.asyncio
 async def test_delete_file_then_404(client, test_user, test_namespace, auth_headers):
-    """Upload → delete → повторный GET по file_id → 404."""
+    """Upload → delete → файл исчезает из исходного namespace, но остаётся в корзине."""
     content = b"to delete"
     upload_resp = await client.post(
         "/api/v1/files/upload",
@@ -126,7 +126,7 @@ async def test_delete_file_then_404(client, test_user, test_namespace, auth_head
     assert del_resp.status_code == status.HTTP_204_NO_CONTENT
 
     get_resp = await client.get(f"/api/v1/files/download/{file_id}", headers=auth_headers)
-    assert get_resp.status_code == status.HTTP_404_NOT_FOUND
+    assert get_resp.status_code == status.HTTP_200_OK
 
     ns_resp = await client.get(f"/api/v1/namespaces/{test_namespace.id}", headers=auth_headers)
     assert ns_resp.status_code == status.HTTP_200_OK

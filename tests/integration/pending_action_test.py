@@ -4,10 +4,10 @@
 Сценарий:
 1. Создаём тестовые данные напрямую в БД (файл, чат с pending_action).
 2. Отправляем сообщение «да» через POST /ask с chat_id.
-3. ChatService.ask() видит pending_action и выполняет или отменяет удаление —
+3. ChatService.ask() видит pending_action и выполняет или отменяет перемещение в корзину —
    не доходя до LangGraph.
 
-Тесты не требуют работающего MinIO: delete_file удаляет только user_files-запись.
+Тесты не требуют работающего MinIO: delete_file переносит user_files-запись в корзину.
 """
 import pytest
 from fastapi import status
@@ -73,7 +73,7 @@ async def file_with_chat(db_session, test_user, test_namespace):
 async def test_pending_delete_file_confirmed(client, test_user, auth_headers, file_with_chat, db_session):
     """
     Сценарий: файл существует → чат ожидает подтверждения удаления →
-    пользователь пишет «да» → файл удаляется из user_files.
+    пользователь пишет «да» → файл переносится в корзину.
     """
     user_file_id, chat_id = file_with_chat
 
@@ -86,16 +86,22 @@ async def test_pending_delete_file_confirmed(client, test_user, auth_headers, fi
 
     assert response.status_code == status.HTTP_200_OK, response.text
     answer = response.json()["data"]["answer"]
-    # ChatService возвращает «удалён» или «удалено»
-    assert "удал" in answer.lower(), f"Ожидали подтверждение удаления, получили: {answer}"
+    assert "корзин" in answer.lower(), f"Ожидали перемещение в корзину, получили: {answer}"
 
-    # Файл должен исчезнуть из user_files
+    # Файл остаётся в user_files, но переносится из исходного namespace в trash.
     result = await db_session.execute(
-        text("SELECT COUNT(*) FROM user_files WHERE id = :id"),
+        text(
+            """
+            SELECT n.kind
+            FROM user_files uf
+            JOIN namespaces n ON n.id = uf.namespace_id
+            WHERE uf.id = :id
+            """
+        ),
         {"id": user_file_id},
     )
-    count = result.scalar()
-    assert count == 0, "Запись user_files должна быть удалена после подтверждения"
+    kind = result.scalar()
+    assert kind == "trash", "Запись user_files должна быть перенесена в корзину"
 
     # pending_action в чате должен быть сброшен
     result2 = await db_session.execute(

@@ -52,9 +52,11 @@ class MockLLMProvider:
     ) -> str:
         system_text = (messages[0].get("text") or "") if messages else ""
 
-        if "классификатор намерений" in system_text or "КЛЮЧЕВЫЕ ПРАВИЛА" in system_text:
+        if "классификатор намерений" in system_text:
+            return json.dumps({"intents": [self.intent]}, ensure_ascii=False)
+
+        if "КРИТИЧНО: верни ТОЛЬКО JSON" in system_text:
             result = {
-                "intent": self.intent,
                 "search_query": self.intent_params.get("search_query"),
                 "namespace_hint": self.intent_params.get("namespace_hint"),
                 "search_mode": self.intent_params.get("search_mode"),

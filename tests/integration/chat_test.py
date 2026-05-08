@@ -46,12 +46,12 @@ async def test_ask_without_question_422(client, test_user, auth_headers):
 
 @pytest.mark.asyncio
 async def test_ask_no_auth_403(client):
-    """POST /ask без JWT-токена — 403."""
+    """POST /ask без JWT-токена — 401."""
     response = await client.post(
         "/api/v1/ask",
         data={"question": "Привет"},
     )
-    assert response.status_code == status.HTTP_403_FORBIDDEN, response.json()
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED, response.json()
 
 
 @pytest.mark.asyncio

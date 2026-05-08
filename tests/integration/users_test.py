@@ -44,15 +44,15 @@ async def test_get_me(client, test_user, auth_headers):
 
 @pytest.mark.asyncio
 async def test_get_me_no_token(client):
-    """GET /api/v1/users/me без токена → 403."""
+    """GET /api/v1/users/me без токена → 401."""
     response = await client.get("/api/v1/users/me")
-    assert response.status_code == status.HTTP_403_FORBIDDEN, response.json()
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED, response.json()
 
 
 @pytest.mark.asyncio
-async def test_get_user_by_id(client, test_user):
-    """GET /api/v1/users/{id} — получение по ID, без авторизации → 200."""
-    response = await client.get(f"/api/v1/users/{test_user.id}")
+async def test_get_user_by_id(client, test_user, auth_headers):
+    """GET /api/v1/users/{id} — получение своего профиля по ID → 200."""
+    response = await client.get(f"/api/v1/users/{test_user.id}", headers=auth_headers)
     assert response.status_code == status.HTTP_200_OK, response.json()
     data = response.json()["data"]
     assert data["id"] == test_user.id
@@ -60,8 +60,8 @@ async def test_get_user_by_id(client, test_user):
 
 
 @pytest.mark.asyncio
-async def test_get_user_not_found(client):
-    """GET /api/v1/users/99999 — несуществующий ID → 404."""
-    response = await client.get("/api/v1/users/99999")
-    assert response.status_code == status.HTTP_404_NOT_FOUND, response.json()
+async def test_get_user_not_found(client, auth_headers):
+    """GET /api/v1/users/99999 — чужой/несуществующий ID недоступен → 403."""
+    response = await client.get("/api/v1/users/99999", headers=auth_headers)
+    assert response.status_code == status.HTTP_403_FORBIDDEN, response.json()
     assert "detail" in response.json()

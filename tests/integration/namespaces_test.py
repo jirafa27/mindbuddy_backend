@@ -179,7 +179,8 @@ async def test_list_namespaces_pagination(client, test_user, auth_headers):
     assert response.status_code == status.HTTP_200_OK, response.json()
     data = response.json()["data"]
     assert len(data["items"]) == 2, data
-    assert data["pagination"]["total"] == 5, data["pagination"]
+    # У пользователя также есть системное корневое пространство Vault.
+    assert data["pagination"]["total"] == 6, data["pagination"]
     assert data["pagination"]["has_next"] is True
     assert data["pagination"]["has_previous"] is False
 

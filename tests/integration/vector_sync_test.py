@@ -120,7 +120,7 @@ async def test_replace_file_deletes_old_vectors(
 
 
 # ---------------------------------------------------------------------------
-# Дополнительный тест: удаление файла также чистит векторы
+# Дополнительный тест: удаление файла переносит его в корзину
 # ---------------------------------------------------------------------------
 
 
@@ -129,10 +129,10 @@ async def test_delete_file_does_not_leave_orphan_vectors(
     client, test_user, auth_headers, file_with_vectors, db_session
 ):
     """
-    DELETE /files/{user_file_id} → запись user_files удалена.
+    DELETE /files/{user_file_id} → запись user_files переносится в корзину.
 
-    Примечание: текущая реализация delete_file удаляет только user_files-запись.
-    Сам content-файл (files) и его векторы остаются до полного GC.
+    Примечание: текущая реализация delete_file делает soft-delete через trash namespace.
+    Сам content-файл (files), user_files-запись и векторы остаются до полного GC.
     Тест документирует это поведение — если оно изменится, тест упадёт и
     напомнит об обновлении логики.
     """
@@ -144,12 +144,19 @@ async def test_delete_file_does_not_leave_orphan_vectors(
     )
     assert response.status_code == status.HTTP_204_NO_CONTENT, response.text
 
-    # user_files запись удалена
+    # user_files запись остаётся, но namespace становится trash.
     result = await db_session.execute(
-        text("SELECT COUNT(*) FROM user_files WHERE id = :id"),
+        text(
+            """
+            SELECT n.kind
+            FROM user_files uf
+            JOIN namespaces n ON n.id = uf.namespace_id
+            WHERE uf.id = :id
+            """
+        ),
         {"id": user_file_id},
     )
-    assert result.scalar() == 0, "user_files запись должна быть удалена"
+    assert result.scalar() == "trash", "user_files запись должна быть перенесена в корзину"
 
 
 # ---------------------------------------------------------------------------
